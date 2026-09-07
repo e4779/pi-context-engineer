@@ -5,6 +5,7 @@
 ### Capability-preserving remediation
 
 - Added machine-readable child execution with observed Usage aggregation, completeness flags, supported-provider generation caps, turn/buffer limits, and minimal no-tools summarizer prompts. Codex uses an explicitly approximate streaming fallback rather than unsupported request fields; generation-limit truncation remains visible to Main.
+- Declared `@earendil-works/pi-ai` as a matching peer so clean npm installs and the release CI typecheck resolve the Usage types.
 - Added 200+ deterministic remediation checks, including the actual Pi host error wrapper and a hung-callback deadline probe, plus an opt-in paired hidden-answer effectiveness harness. Kept legacy known-marker benchmarks explicitly labeled as plumbing checks, not proof of unchanged agent quality.
 
 - Made model-summary reduction strictly convergent with a binary tree, bounded input reads, a total model-call budget, and a whole-operation deadline. Insufficient input/call budgets fail before model work instead of substituting a first-chunk summary. Explicit direct summaries report coverage and continuation; model inputs and oversized delegated outputs retain exact recovery handles.

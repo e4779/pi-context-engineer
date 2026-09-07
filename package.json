@@ -52,6 +52,7 @@
     "typescript": "^5.5.0"
   },
   "peerDependencies": {
+    "@earendil-works/pi-ai": ">=0.80.0",
     "@earendil-works/pi-coding-agent": ">=0.80.0",
     "typebox": "*",
     "pi-fabric": "*"
