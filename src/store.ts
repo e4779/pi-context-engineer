@@ -29,6 +29,33 @@ export const DEFAULT_CONTEXT_STORE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 export const MAX_CONTEXT_STORE_BYTES = 500_000_000;
 export const DEFAULT_MEMORY_STORE_MAX_BYTES = 5_000_000;
 
+/** Extendable secret patterns redacted from previews and error text. */
+export const SECRET_REDACT_PATTERNS: RegExp[] = [
+  /AKIA[0-9A-Z]{16}/g,
+  /sk-[A-Za-z0-9_\-]{8,}/g,
+  /xox[baprs]-[A-Za-z0-9\-_]+/g,
+  /-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z0-9 ]*PRIVATE KEY-----/g,
+];
+
+/** Redact secrets from preview/error text; extendable via extra patterns. */
+export function redactSecrets(text: string, extra: RegExp[] = []): string {
+  let out = text;
+  for (const rx of [...SECRET_REDACT_PATTERNS, ...extra]) {
+    try {
+      rx.lastIndex = 0;
+      out = out.replace(rx, "[REDACTED]");
+    } catch {
+      // A bad extra pattern must never break storage.
+    }
+  }
+  return out;
+}
+
+/** Directories whose layout is initialized; avoids mkdir/chmod per operation. */
+const layoutInitCache = new Set<string>();
+/** Process-wide handle-ID counter ensuring auto IDs are unique. */
+let storeIdCounter = 0;
+
 export interface StoreEntry {
   id: string;
   key: string;
@@ -76,6 +103,8 @@ export interface ReadOptions {
 }
 
 export interface ReadResult {
+  /** Transport status, independent of the stored payload text. */
+  ok: boolean;
   id: string;
   totalBytes: number;
   totalTokens: number;
@@ -304,10 +333,14 @@ export class ContextStore {
   }
 
   private ensureLayout(): void {
-    mkdirSync(this.dir, { recursive: true, mode: STORE_DIR_MODE });
-    mkdirSync(this.blobsDir, { recursive: true, mode: STORE_DIR_MODE });
-    chmodSync(this.dir, STORE_DIR_MODE);
-    chmodSync(this.blobsDir, STORE_DIR_MODE);
+    const initialized = layoutInitCache.has(this.dir);
+    if (!initialized || !existsSync(this.dir)) mkdirSync(this.dir, { recursive: true, mode: STORE_DIR_MODE });
+    if (!initialized || !existsSync(this.blobsDir)) mkdirSync(this.blobsDir, { recursive: true, mode: STORE_DIR_MODE });
+    if (!initialized) {
+      try { chmodSync(this.dir, STORE_DIR_MODE); } catch { /* best effort */ }
+      try { chmodSync(this.blobsDir, STORE_DIR_MODE); } catch { /* best effort */ }
+      layoutInitCache.add(this.dir);
+    }
 
     if (!existsSync(this.indexFile)) {
       this.withLock(() => {
@@ -339,8 +372,11 @@ export class ContextStore {
   }
 
   private withLock<T>(fn: () => T): T {
-    mkdirSync(this.dir, { recursive: true, mode: STORE_DIR_MODE });
-    chmodSync(this.dir, STORE_DIR_MODE);
+    if (!layoutInitCache.has(this.dir) || !existsSync(this.dir)) {
+      mkdirSync(this.dir, { recursive: true, mode: STORE_DIR_MODE });
+      try { chmodSync(this.dir, STORE_DIR_MODE); } catch { /* best effort */ }
+      layoutInitCache.add(this.dir);
+    }
     let fd: number | undefined;
     const deadline = Date.now() + LOCK_TIMEOUT_MS;
     while (fd === undefined) {
@@ -463,8 +499,9 @@ export class ContextStore {
     return actual;
   }
 
-  private baseResult(entry: StoreMetadata): Pick<ReadResult, "id" | "totalBytes" | "totalTokens" | "contentType"> {
+  private baseResult(entry: StoreMetadata): Pick<ReadResult, "ok" | "id" | "totalBytes" | "totalTokens" | "contentType"> {
     return {
+      ok: true,
       id: entry.id,
       totalBytes: entry.bytes,
       totalTokens: entry.estimatedTokens,
@@ -481,7 +518,7 @@ export class ContextStore {
         ...this.baseResult(entry),
         bytesRead: 0,
         offset: requestedOffset,
-        nextOffset: requestedOffset < totalBytes ? requestedOffset : undefined,
+        ...(requestedOffset < totalBytes ? { nextOffset: requestedOffset } : {}),
         content: "",
         truncated: requestedOffset < totalBytes,
       };
@@ -499,7 +536,7 @@ export class ContextStore {
       ...this.baseResult(entry),
       bytesRead: actualEnd - actualOffset,
       offset: actualOffset,
-      nextOffset: truncated ? actualEnd : undefined,
+      ...(truncated ? { nextOffset: actualEnd } : {}),
       content: truncated
         ? content + `\n... [${totalBytes - actualEnd} more bytes, use ctx_read with offset=${actualEnd} to continue]`
         : content,
@@ -516,6 +553,7 @@ export class ContextStore {
       return {
         ...this.baseResult(entry),
         jsonPath,
+        ok: false,
         content: `Error: stored result "${entry.id}" is not valid JSON; JSON path "${jsonPath}" cannot be selected.`,
         bytesRead: 0,
         truncated: false,
@@ -527,6 +565,7 @@ export class ContextStore {
       return {
         ...this.baseResult(entry),
         jsonPath,
+        ok: false,
         content: `Error: ${parsedPath}`,
         bytesRead: 0,
         truncated: false,
@@ -543,6 +582,7 @@ export class ContextStore {
         return {
           ...this.baseResult(entry),
           jsonPath,
+          ok: false,
           content: `Error: JSON path "${jsonPath}" was not found in stored result "${entry.id}".`,
           bytesRead: 0,
           truncated: false,
@@ -707,7 +747,7 @@ export class ContextStore {
   }
 
   private handleResult(entry: StoreMetadata, data: string): StoreHandle {
-    const preview = structuralPreview(data, DEFAULT_PREVIEW_BYTES, entry.contentType);
+    const preview = redactSecrets(structuralPreview(data, DEFAULT_PREVIEW_BYTES, entry.contentType));
     const truncated = entry.bytes > DEFAULT_PREVIEW_BYTES;
     return {
       id: entry.id,
@@ -721,7 +761,7 @@ export class ContextStore {
   }
 
   private errorResult(id: string, content: string): ReadResult {
-    return { id, totalBytes: 0, totalTokens: 0, bytesRead: 0, content, truncated: false };
+    return { ok: false, id, totalBytes: 0, totalTokens: 0, bytesRead: 0, content: redactSecrets(content), truncated: false };
   }
 
   private hash(data: string): string {
@@ -729,9 +769,35 @@ export class ContextStore {
   }
 
   private makeId(key: string, contentHash: string): string {
-    return `${key.replace(/[^a-z0-9]/gi, "-").slice(0, 32)}-${contentHash.slice(0, 12)}`;
+    const slug = key.replace(/[^a-z0-9]/gi, "-").slice(0, 24) || "ctx";
+    storeIdCounter = (storeIdCounter + 1) % 1296;
+    const suffix = `${Date.now().toString(36).slice(-4)}${storeIdCounter.toString(36)}${Math.floor(Math.random() * 1296).toString(36)}`.slice(-6);
+    return `${slug}-${contentHash.slice(0, 8)}-${suffix}`.toLowerCase().replace(/[^a-z0-9-]/g, "-");
   }
 }
+
+/**
+ * Per-cwd ContextStore cache; avoids mkdir/chmod + index parsing per tool_result.
+ * TTL sweep + byte-cap LRU eviction still run on write with the newest handle
+ * protected (see gcLocked). Old handle IDs remain readable (lookup by equality).
+ */
+export function cachedContextStore(workspaceRoot: string, relativeDir = ".pi/context-store", options: StoreOptions = {}): ContextStore {
+  const resolved = resolve(workspaceRoot, relativeDir);
+  const ttlMs = normalizeTtlMs(options.ttlMs);
+  const maxBytes = normalizeMaxBytes(options.maxBytes);
+  const key = `${resolved}::${ttlMs}::${maxBytes}`;
+  const hit = storeInstanceCache.get(key);
+  if (hit) return hit.store;
+  const store = new ContextStore(workspaceRoot, relativeDir, { ttlMs, maxBytes });
+  if (storeInstanceCache.size >= 32) {
+    const oldest = storeInstanceCache.keys().next();
+    if (!oldest.done) storeInstanceCache.delete(oldest.value);
+  }
+  storeInstanceCache.set(key, { store, ttlMs, maxBytes });
+  return store;
+}
+
+const storeInstanceCache = new Map<string, { store: ContextStore; ttlMs: number; maxBytes: number }>();
 
 function parseJsonPath(path: string): Array<string | number> | string {
   const input = path.trim();

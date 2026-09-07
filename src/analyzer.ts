@@ -805,6 +805,21 @@ function evaluateMethodCall(
       // taint and let the final bound check reject raw-preserving transforms.
       state.meaningfulTransformations++;
       return withUnknownBound({ ...receiver, operation: `${method} preserves source` });
+    case "then": {
+      const callbacks = call.arguments.filter((arg) => ts.isArrowFunction(arg) || ts.isFunctionExpression(arg));
+      if (callbacks.length === 0) return { ...receiver, operation: "then preserves source" };
+      const results = callbacks.map((fn) => evaluateCallback(fn as ts.Expression, receiver, env, state, sf));
+      if (results.length === 1) return results[0];
+      return combine(results, "then preserves source", true);
+    }
+    case "catch": {
+      const callbacks = call.arguments.filter((arg) => ts.isArrowFunction(arg) || ts.isFunctionExpression(arg));
+      if (callbacks.length === 0) return { ...receiver, operation: "catch preserves source" };
+      const handled = callbacks.map((fn) => evaluateCallback(fn as ts.Expression, receiver, env, state, sf));
+      return combine([receiver, ...handled], "catch preserves source", true);
+    }
+    case "finally":
+      return { ...receiver, operation: "finally preserves source" };
     case "sort":
     case "reverse":
       return withUnknownBound({ ...receiver, operation: `${method} reorders source` });
@@ -930,10 +945,24 @@ function evaluateExpression(expr: ts.Expression, env: Map<string, Flow>, state: 
   if (ts.isAwaitExpression(value)) return evaluateExpression(value.expression, env, state, sf);
   if (ts.isIdentifier(value)) return env.get(value.text) ?? cleanFlow(`identifier ${value.text}`);
   if (ts.isNumericLiteral(value)) return cleanFlow("literal", Number(value.text));
-  if (ts.isPrefixUnaryExpression(value) && ts.isNumericLiteral(value.operand)) {
+  if (ts.isPostfixUnaryExpression(value)) {
+    if (value.operator === ts.SyntaxKind.PlusPlusToken || value.operator === ts.SyntaxKind.MinusMinusToken) {
+      const operand = unwrap(value.operand as ts.Expression);
+      if (ts.isIdentifier(operand)) return env.get(operand.text) ?? cleanFlow(`identifier ${operand.text}`);
+      return evaluateExpression(value.operand as ts.Expression, env, state, sf);
+    }
+  }
+  if (ts.isPrefixUnaryExpression(value)) {
+    if (value.operator === ts.SyntaxKind.PlusPlusToken || value.operator === ts.SyntaxKind.MinusMinusToken) {
+      const operand = unwrap(value.operand as ts.Expression);
+      if (ts.isIdentifier(operand)) return env.get(operand.text) ?? cleanFlow(`identifier ${operand.text}`);
+      return evaluateExpression(value.operand as ts.Expression, env, state, sf);
+    }
+    if (ts.isNumericLiteral(value.operand)) {
     const number = Number(value.operand.text);
     if (value.operator === ts.SyntaxKind.MinusToken) return cleanFlow("literal", -number);
     if (value.operator === ts.SyntaxKind.PlusToken) return cleanFlow("literal", number);
+    }
   }
   if (ts.isStringLiteral(value) || ts.isBigIntLiteral(value) || ts.isRegularExpressionLiteral(value)) return cleanFlow("literal");
   if (value.kind === ts.SyntaxKind.TrueKeyword || value.kind === ts.SyntaxKind.FalseKeyword || value.kind === ts.SyntaxKind.NullKeyword) return cleanFlow("literal");
@@ -1021,13 +1050,108 @@ function collectFunctions(node: ts.Node, functions: Map<string, FunctionLike>): 
   ts.forEachChild(node, (child) => collectFunctions(child, functions));
 }
 
+function rootIdentifierForWrite(target: ts.Expression): string | undefined {
+  let current: ts.Expression = unwrap(target);
+  while (ts.isPropertyAccessExpression(current) || ts.isElementAccessExpression(current)) {
+    current = unwrap(current.expression);
+  }
+  return ts.isIdentifier(current) ? current.text : undefined;
+}
+
+function isCompoundAssignmentKind(kind: ts.SyntaxKind): boolean {
+  switch (kind) {
+    case ts.SyntaxKind.PlusEqualsToken:
+    case ts.SyntaxKind.MinusEqualsToken:
+    case ts.SyntaxKind.AsteriskEqualsToken:
+    case ts.SyntaxKind.AsteriskAsteriskEqualsToken:
+    case ts.SyntaxKind.SlashEqualsToken:
+    case ts.SyntaxKind.PercentEqualsToken:
+    case ts.SyntaxKind.LessThanLessThanEqualsToken:
+    case ts.SyntaxKind.GreaterThanGreaterThanEqualsToken:
+    case ts.SyntaxKind.GreaterThanGreaterThanGreaterThanEqualsToken:
+    case ts.SyntaxKind.AmpersandEqualsToken:
+    case ts.SyntaxKind.BarEqualsToken:
+    case ts.SyntaxKind.CaretEqualsToken:
+    case ts.SyntaxKind.BarBarEqualsToken:
+    case ts.SyntaxKind.AmpersandAmpersandEqualsToken:
+    case ts.SyntaxKind.QuestionQuestionEqualsToken:
+      return true;
+    default:
+      return false;
+  }
+}
+
+function taintBaseForContainerWrite(
+  baseName: string,
+  rhs: Flow,
+  env: Map<string, Flow>,
+  operation: string,
+): void {
+  if (!rhs.hasSource) return;
+  const old = env.get(baseName);
+  const provenance = [...(old?.hasSource ? old.provenance : []), ...rhs.provenance];
+  if (!rhs.bounded) {
+    env.set(baseName, sourceFlow("unknown", operation, 1, provenance));
+    return;
+  }
+  if (old?.hasSource) {
+    const combined = combine([old, rhs], operation, true);
+    env.set(baseName, { ...combined, operation });
+    return;
+  }
+  env.set(baseName, { ...rhs, operation, provenance });
+}
+
+function applyBinaryBinding(node: ts.BinaryExpression, env: Map<string, Flow>, state: EvalState, sf: ts.SourceFile): void {
+  const kind = node.operatorToken.kind;
+  const isPlain = kind === ts.SyntaxKind.EqualsToken;
+  const isCompound = isCompoundAssignmentKind(kind);
+  if (!isPlain && !isCompound) return;
+  const opText = ts.tokenToString(kind) ?? (isPlain ? "=" : "compound assignment");
+  if (ts.isIdentifier(node.left)) {
+    const rhs = evaluateExpression(node.right, env, state, sf);
+    if (isPlain) {
+      env.set(node.left.text, rhs);
+      return;
+    }
+    const old = env.get(node.left.text) ?? cleanFlow(`identifier ${node.left.text}`);
+    const combined = combine([old, rhs], `${opText} combines source`, true);
+    env.set(node.left.text, combined);
+    return;
+  }
+  const baseName = rootIdentifierForWrite(node.left);
+  if (baseName === undefined) return;
+  const rhs = evaluateExpression(node.right, env, state, sf);
+  const operation = isPlain
+    ? "property assignment preserves source"
+    : `${opText} property assignment preserves source`;
+  taintBaseForContainerWrite(baseName, rhs, env, operation);
+}
+
+function applyUpdateBinding(node: ts.PrefixUnaryExpression | ts.PostfixUnaryExpression, env: Map<string, Flow>): void {
+  const op = node.operator;
+  if (op !== ts.SyntaxKind.PlusPlusToken && op !== ts.SyntaxKind.MinusMinusToken) return;
+  const operand = unwrap(node.operand as ts.Expression);
+  if (ts.isIdentifier(operand)) {
+    const old = env.get(operand.text) ?? cleanFlow(`identifier ${operand.text}`);
+    const combined = combine([old, cleanFlow("increment")], "increment preserves source", true);
+    env.set(operand.text, combined);
+    return;
+  }
+  // Property/element increments preserve an already-tainted container; a
+  // clean container holding only a counter stays clean, so no env change.
+}
+
 function visitBindings(node: ts.Node, env: Map<string, Flow>, state: EvalState, sf: ts.SourceFile): void {
   if (isFunctionLikeNode(node)) return;
   if (ts.isVariableDeclaration(node) && node.initializer) {
     bindPattern(node.name, evaluateExpression(node.initializer, env, state, sf), env, state, sf);
   }
-  if (ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.EqualsToken && ts.isIdentifier(node.left)) {
-    env.set(node.left.text, evaluateExpression(node.right, env, state, sf));
+  if (ts.isBinaryExpression(node)) {
+    applyBinaryBinding(node, env, state, sf);
+  }
+  if (ts.isPrefixUnaryExpression(node) || ts.isPostfixUnaryExpression(node)) {
+    applyUpdateBinding(node, env);
   }
   if (ts.isForOfStatement(node) || ts.isForInStatement(node)) {
     const iterable = evaluateExpression(node.expression, env, state, sf);
@@ -1043,6 +1167,27 @@ function visitBindings(node: ts.Node, env: Map<string, Flow>, state: EvalState, 
     visitBindings(node.statement, env, state, sf);
     return;
   }
+  if (ts.isForStatement(node)) {
+    if (node.initializer) visitBindings(node.initializer, env, state, sf);
+    // Loop-carried reassignment (for(;;) bodies run repeatedly) is modeled by
+    // visiting the body and incrementor, then the body once more so `x +=`
+    // inside the loop combines the pre-loop value with the in-loop update.
+    if (node.statement) visitBindings(node.statement, env, state, sf);
+    if (node.incrementor) visitBindings(node.incrementor, env, state, sf);
+    if (node.statement) visitBindings(node.statement, env, state, sf);
+    // Condition may contain assignments as expressions; visit for completeness.
+    if (node.condition) visitBindings(node.condition, env, state, sf);
+    return;
+  }
+  if (ts.isWhileStatement(node) || ts.isDoStatement(node)) {
+    // `while`/`do` bodies may execute zero or many times; a second visit
+    // propagates loop-carried `x =`/`x +=`/property writes to the return env.
+    visitBindings(node.statement, env, state, sf);
+    visitBindings(node.statement, env, state, sf);
+    if (ts.isWhileStatement(node)) visitBindings(node.expression, env, state, sf);
+    else if (node.expression) visitBindings(node.expression, env, state, sf);
+    return;
+  }
   ts.forEachChild(node, (child) => visitBindings(child, env, state, sf));
 }
 
@@ -1056,6 +1201,12 @@ function visitFunctionStatements(
   if (isFunctionLikeNode(node) && !ts.isBlock(node)) return;
   if (ts.isVariableDeclaration(node) && node.initializer) {
     bindPattern(node.name, evaluateExpression(node.initializer, env, state, sf), env, state, sf);
+  }
+  if (ts.isBinaryExpression(node)) {
+    applyBinaryBinding(node, env, state, sf);
+  }
+  if (ts.isPrefixUnaryExpression(node) || ts.isPostfixUnaryExpression(node)) {
+    applyUpdateBinding(node, env);
   }
   if (ts.isReturnStatement(node) && node.expression) returns.push(evaluateExpression(node.expression, env, state, sf));
   ts.forEachChild(node, (child) => visitFunctionStatements(child, env, state, sf, returns));

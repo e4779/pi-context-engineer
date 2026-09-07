@@ -358,8 +358,8 @@ const wrapperOk =
   runtimeDecision.tier === "WARN" &&
   strictDecision.tier === "BLOCK" &&
   explicitBlockDecision.tier === "BLOCK" &&
-  certainDecision.tier === "BLOCK";
-console.log(`${wrapperOk ? "[ok]" : "[FAIL]"} runtime-first wrapper keeps strict/certain fail-closed modes`);
+  certainDecision.tier === "WARN";
+console.log(`${wrapperOk ? "[ok]" : "[FAIL]"} runtime-first wrapper delegates default validation and preserves explicit strict modes`);
 let wrapperFailures = wrapperOk ? 0 : 1;
 
 console.log("---");
@@ -612,8 +612,9 @@ if (!delegateTool) {
 } else {
   let delegatedPrompt = "";
   let delegatedTimeout = 0;
+  let recoveredDelegate = "";
   const delegateContext = {
-    store: { read: () => ({ content: "", truncated: false }) },
+    store: { write: (_key: string, _source: string, data: string) => { recoveredDelegate = data; return { id: "delegate-proof" }; } },
     workspaceRoot: process.cwd(),
     callTool: async () => ({}),
     spawnAgent: async (prompt: string, opts?: { timeoutMs?: number }) => {
@@ -633,7 +634,8 @@ if (!delegateTool) {
     delegated.truncated === true &&
     delegated.timeoutSeconds === 110 &&
     delegatedTimeout === 110_000 &&
-    delegatedPrompt.includes("under 100 tokens");
+    delegatedPrompt.includes("under 100 tokens") && recoveredDelegate.length === 5000 &&
+    (delegated.recovery as { id?: string })?.id === "delegate-proof";
   console.log(`${delegateOk ? "[ok]" : "[FAIL]"} ctx_delegate bounds output and nested deadline`);
   if (!delegateOk) toolFailures++;
 }

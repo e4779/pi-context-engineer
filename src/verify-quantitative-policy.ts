@@ -133,7 +133,8 @@ export function runV05PolicyChecks(): V05PolicyCheckResult {
   check("custom token budget: over-budget", custom.metrics.quantitativeDecision?.kind === "over-budget");
   check("custom token budget: remains blocked", custom.ok === false && custom.hardBlock === true);
   check("strict wrapper: within-budget passes", evaluateProgram(cases[0].program, { strict: true }).tier === "PASS");
-  check("wrapper: over-budget blocks", evaluateProgram(cases[4].program).tier === "BLOCK");
+  check("wrapper: over-budget advises by default", evaluateProgram(cases[4].program).tier === "WARN");
+  check("strict wrapper: over-budget blocks", evaluateProgram(cases[4].program, { strict: true }).tier === "BLOCK");
   check("strict wrapper: custom budget blocks", evaluateProgram(cases[0].program, { strict: true, quantitativePolicy: { maxTokens: 1000 } }).tier === "BLOCK");
 
   return { passed: checks - failures.length, failed: failures.length, failures, intentionalPassed, intentionalTotal, parityPassed, parityTotal };

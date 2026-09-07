@@ -27,18 +27,21 @@ The analyzer distinguishes:
 
 Scalar projections, `some()`/`every()`/`includes()`, one-item selectors such as `find()`, explicit `slice(0, N)`, Fovea `maxTokens`, summaries, and offloads establish bounds. Numeric bounds survive aliases and local helper arguments, and common tool status fields such as `ok`, `exitCode`, and `truncated` are treated as scalars. `map()`, `filter()`, `reduce()`, `Object.entries()`/`values()`, `trim()`, and `replace()` can still retain the full source, so the analyzer marks them unbounded unless a later operation derives an explicit bound.
 
-By default, an uncertain source-bearing return is classified as a warning but **executes silently**. The runtime boundary guard then keeps a small actual result or offloads a large one. Use `ce_exec` when you want the static diagnostic explicitly. This avoids blocking useful work because of a conservative static approximation. Set `strict: true` or `blockUnboundedReturns: true` for fail-closed preflight. Statically certain failures such as an empty program or oversized literal remain blocked in every mode. The number of internal calls is not the primary limit: a Fabric program may make many calls when its boundary result is controlled.
+By default, an uncertain source-bearing return is classified as a warning but **executes silently**. The runtime boundary guard then keeps a small actual result or offloads a large one. Use `ce_exec` when you want the static diagnostic explicitly. This avoids blocking useful work because of a conservative static approximation. Set `strict: true` or `blockUnboundedReturns: true` for fail-closed preflight. Default preflight is advisory even for zero-source projections and estimated oversized returns. Fabric retains authoritative syntax/execution validation; only explicit strict/blocking settings turn CE diagnostics into pre-execution blocks. The number of internal calls is not the primary limit: a Fabric program may make many calls when its boundary result is controlled.
 
 ### Runtime boundary guard
 
-The extension preserves ordinary intermediate `pi.*` results while Fabric code is running. It also consumes Fabric's documented nested provider-result proxy:
+CE leaves **all** internal Fabric values intact: ordinary `pi.*` results, MCP results, captured Fovea/CE tools, and provider proxy `details.result`. Fabric owns its executor/transport limits. Explicit `ctx_offload` remains available when the program deliberately wants a handle.
 
-1. inspect the actual provider value before QuickJS receives it;
-2. offload oversized provider values to `.pi/context-store/`;
-3. patch the structured proxy value with a handle and preview;
-4. leave already-bounded Fabric and Fovea results alone.
+At the model boundary CE budgets the **sum of all text blocks**, not just the first. Single-text handles store the exact text unchanged. Multi-text handles store `{ textBlocks: [{ index, text }, ...] }`, preserving every original content-array index; use `jsonPath: "$.textBlocks[0].text"` or byte ranges to recover text. Media retain their positions, short independent notes get a bounded inline allowance, and rewritten slots share one recovery handle. A storage failure leaves the original result visible rather than discarding evidence.
 
-Large final text results are likewise offloaded, but existing Fabric artifact-backed results and budgeted Fovea results are not offloaded a second time. Runtime size advisories are disabled by default because bounded 4–8 KB results are usually intentional; set `runtimeAdvisoryThreshold` to opt in.
+Large final text results are offloaded; budgeted Fovea results that meet their requested size are left alone in auto mode. Artifact metadata alone cannot exempt an oversized payload. JSON previews prioritize short nested status/path/count fields over bulky siblings. Fabric's sectioned-YAML results retain small sections and source-line-labeled outline excerpts; previews are selections, not complete return values. `summarize` uses deterministic structural compression with the full original stored behind a recovery handle. Oversized errors also retain exact originals, not just selected diagnostics.
+
+CE never rewrites grep patterns or other tool arguments. Fabric's catalog repairs handle argument/action naming near-misses; its entropy compiler optimizes tool surfaces. Neither requires CE to guess regex intent.
+
+Recognized successful edit envelopes containing verbose diff/patch strings are compacted from 2 KB onward, even below the ordinary offload threshold. The acknowledgment stays visible and the complete original diff/patch remains retrievable. This only changes model-boundary text, never ordinary intermediate Pi values. Set `compactEditResults: false` to disable the lower edit threshold, or `resultPolicy: "inline"` to bypass successful-result rewriting altogether.
+
+Runtime size advisories are disabled by default because bounded 4–8 KB results are usually intentional; set `runtimeAdvisoryThreshold` to opt in.
 
 ### Fovea-aware selection
 
@@ -77,11 +80,11 @@ The registry remains descriptive, while the analyzer reports `metrics.returnBoun
 
 ### Addressable context store
 
-Stored payloads include content hashes, provenance/source, content type, creation/access timestamps, estimated tokens, and expiry. Identical payloads deduplicate. `ctx_read` supports UTF-8 byte ranges, literal line queries, and focused JSON-path lookups such as `$.results[0].name`. Ranged results expose copyable `offset` / `nextOffset`; query mode formats at most 100 match windows by default (`maxMatches`, capped at 500), samples `matchedLines`, and preserves the exact `totalMatches`. The complete serialized result—not only its text field—is budgeted below the recursive-offload threshold. Handles expose structural previews (JSON keys/counts, or head/tail text/code) rather than dumping arbitrary payloads. At the model boundary, use `ctx_read({ id, offset, length })`; inside Fabric code, use `extensions.ctx_read(...)`. An offload or `ctx_read` preview remains intact for the first model call that needs it; on later calls, the non-destructive `context` hook replaces that repeated text with a one-line handle recipe. The full payload remains re-readable, and session history is never rewritten. By default, entries expire after one week and the store is capped at 500 MB; cleanup runs opportunistically during store activity.
+Stored payloads include content hashes, provenance/source, content type, creation/access timestamps, estimated tokens, and expiry. Identical payloads deduplicate. `ctx_read` supports UTF-8 byte ranges, literal line queries, and focused JSON-path lookups such as `$.results[0].name`. Ranged results expose copyable `offset` / `nextOffset`; query mode formats at most 100 match windows by default (`maxMatches`, capped at 500), samples `matchedLines`, and preserves the exact `totalMatches`. The complete serialized result—not only its text field—is budgeted below the recursive-offload threshold. Handles expose structural previews (JSON keys/counts, or head/tail text/code) rather than dumping arbitrary payloads. At the model boundary, use `ctx_read({ id, offset, length })`; inside Fabric code, use `extensions.ctx_read(...)`. Offload previews are compacted before their first model exposure. After exposure, CE leaves messages unchanged—including `ctx_read` output—so later calls preserve cacheable prefixes and the agent keeps its evidence. CE does not register a historical `context` rewrite hook. Pi's explicit or automatic session compaction remains responsible for shortening accumulated history; stored payloads remain re-readable subject to retention limits. By default, entries expire after one week and the store is capped at 500 MB; cleanup runs opportunistically during store activity.
 
 ### Telemetry
 
-The extension records sizes and strategies—not prompts or payloads—in `.pi/context-store/context-events.jsonl`. Metrics separate `internalTokensProcessed`, `mainTokensPrevented`, `mainTokensInjected`, and `storeTokensWritten`; the legacy `savedTokens` field aliases Main-context prevention for compatibility. Telemetry is scoped by extension runtime, host Pi session, or workspace lifetime; `ctx_status` returns all three, so a fresh runtime can still show session/lifetime activity from earlier runtimes.
+The extension records sizes and strategies—not prompts or payloads—in `.pi/context-store/context-events.jsonl`. Metrics separate `internalTokensProcessed`, `mainTokensPrevented`, `mainTokensInjected`, and `storeTokensWritten`; the legacy `savedTokens` field aliases Main-context prevention for compatibility. Telemetry is scoped by extension runtime, host Pi session, or workspace lifetime; `ctx_status` defaults to a compact report for the selected scope (session by default), without repeated sibling scopes or per-event/per-strategy diagnostics. A fresh runtime can still request session/lifetime activity from earlier runtimes. Use `ctx_status({ scope: "lifetime", detail: "full" })` for all three scopes and diagnostic breakdowns. Existing consumers of `.runtime`, `.session`, or `.lifetime` should request `detail: "full"`; compact callers use `.summary`.
 
 Interactive commands:
 
@@ -94,18 +97,18 @@ Interactive commands:
 /ce clear          clear telemetry
 ```
 
-The numbers are approximate context-token estimates, useful for comparing policies rather than billing reconciliation. Internal provider work is not counted as Main context saved unless CE actually prevents it from crossing the Main boundary.
+The numbers are approximate context-token estimates, not billing reconciliation or proof of agent effectiveness. Internal helper calls do not count as Main exposure; reading an existing handle does not count the same source as prevented again. Use actual model Usage (including nested calls and cache/cost fields) to evaluate billed savings. `ctx_status` exposes `childCalls`, observed `childUsage`, and `childUsageComplete`; incomplete/missing reports are not zero-cost work. Native standalone calls attach observed Usage on success and failure. Current Fabric capture omits nested tool Usage from native totals, so `childUsageOutsideParent` reports the additional observed usage separately; add it exactly once, not all `childUsage` again. The effectiveness harness performs this accounting from isolated-workspace telemetry.
 
 ## Fabric example
 
 ```ts
 const result = await pi.grep({ pattern: "TODO", path: "src" });
 
-return extensions.ctx_summarize({
+return (await extensions.ctx_summarize({
   text: result,
   mode: "code",
   maxTokens: 300,
-});
+})).text; // one model-facing copy; structured details stay exact internally
 ```
 
 ### Summarization modes
@@ -115,7 +118,7 @@ return extensions.ctx_summarize({
 - `code` — free deterministic code-aware extraction of imports, signatures, and head/tail windows.
 - `model` — isolated no-tools semantic summarization; large inputs are chunked and reduced hierarchically.
 
-Unknown modes are rejected. `maxTokens` is an approximate UTF-8 budget and is clamped to a safe range. Model mode also accepts `maxInputTokens` (default 32000 per child-model call) and `strategy: "hierarchical" | "direct"`; hierarchical is the safe default. Prefer `code` or `structural` for source inspection because they avoid an extra model call.
+Unknown modes reject at the registered Pi tool boundary. `maxTokens` is an approximate UTF-8 return budget, clamped to 64–4000. Model mode also accepts `maxInputTokens` (default 32000 approximate source tokens per child), `maxChunks` (default 16, maximum 64), `maxCalls` (default twice `maxChunks`, maximum 128), and a whole-operation `timeoutSeconds` (default 90, range 10–110). Binary reduction guarantees progress; no redundant final model call is made. Model-source data, including inline input, has an exact `recovery` handle. `strategy: "direct"` explicitly selects a prefix and reports `complete`, `coveredBytes`, `totalBytes`, and `nextOffset`; it is never an implicit fallback. Prefer deterministic `code` or `structural` unless semantic compression is needed.
 
 Offloaded results include a copyable `ctx_read({ id, offset, length })` example at the model boundary; inside Fabric code use `extensions.ctx_read(...)`. Use `query` for literal matches or `jsonPath` for focused JSON values.
 
@@ -124,11 +127,11 @@ For large data, write it off-window instead of returning it directly:
 ```ts
 const text = await pi.read({ path: "large.json" });
 
-return extensions.ctx_offload({
+return (await extensions.ctx_offload({
   key: "large-json",
   source: "read",
   data: text,
-});
+})).text;
 ```
 
 Use the returned handle with `ctx_read` to retrieve a range, literal matches, or a focused JSON path later.
@@ -140,12 +143,22 @@ The registered tools are callable directly by the model and inside Fabric throug
 - `ctx_read` — select a range, literal matches, or a JSON path from a stored handle
 - `ctx_summarize` — free structural/code compression or isolated no-tools model compression
 - `ctx_remember` / `ctx_recall` / `ctx_forget` — persistent project facts with bounded recall, named upserts, and deletion
-- `ctx_delegate` — isolated child Pi fallback with bounded output and a nested-safe deadline
+- `ctx_delegate` — isolated child Pi with `maxTokens`, `maxTurns` (default 8, range 1–32), a nested-safe deadline, bounded process-output buffers, and parent cancellation. Supported adapters receive real generation caps. Codex has no supported server output-cap field, so it uses an explicitly approximate streaming guard instead; `generationBudget` reports this limitation and billed output may overshoot or be unknown on cancellation. `childOutputTruncated: true` exposes provider-length truncation. Oversized returned text has an exact recovery handle. Pure summaries disable tools/project context and use a minimal prompt. Timeout/abort terminates process trees, escalating to SIGKILL on POSIX.
 - `ctx_offload` — manual Write operation
 - `ctx_status` — current policy thresholds and observed savings
 - `ce_exec` — explicit static preflight (`PASS`, `WARN`, or `BLOCK`)
 
 For Fabric-native orchestration and recursive decomposition, call Fabric's `agents.*` APIs directly when available.
+
+Prefer compact discovery before requesting complete schemas. For example, select only matching tool names/refs inside Fabric rather than returning the entire catalog:
+
+```ts
+const catalog = await tools.list({});
+return catalog.filter(t => /blender/i.test(t.name + " " + t.description))
+  .slice(0, 10).map(t => ({ name: t.name, ref: t.ref }));
+```
+
+Then describe only the tools you will call. Context Engineer does not override Fabric's discovery API.
 
 ## Configuration
 
@@ -158,26 +171,67 @@ Create `.pi/context-engineer.json` in a project when needed:
   "blockUnboundedReturns": false,
   "maxReturnTokens": 4000,
   "readOffloadThreshold": 16384,
-  "nestedResultThreshold": 16384,
   "resultPolicy": "auto",
   "errorCompactionThreshold": 4096,
   "errorCompactionPreviewBytes": 4096,
   "offloadPreviewBytes": 2048,
   "runtimeAdvisoryThreshold": 0,
-  "compactStaleResults": true,
+  "compactEditResults": true,
   "notifyOnStart": false,
   "storeMaxBytes": 500000000,
   "storeTtlMs": 604800000
 }
 ```
 
+### Config reference
+
+All options live in `.pi/context-engineer.json` (field names are exact `CeConfig` keys). Byte budgets are UTF-8 bytes; token estimates are ~bytes/4 and ASCII-biased (see note below).
+
+| Option | Type | Default | Notes |
+| --- | --- | --- | --- |
+| `enabled` | boolean | `true` | Set `false` to disable enforcement hooks. |
+| `strict` | boolean | `false` | Fail closed on statically unbounded source returns and soft warnings. |
+| `blockUnboundedReturns` | boolean | `false` | Block statically unbounded source returns before execution; `strict: true` implies blocking. |
+| `maxReturnTokens` | number | `4000` | Static advisory budget only; enforced by explicit strict/blocking modes. Maps to ~16 KB at ~4 chars/token (ASCII-biased). |
+| `maxUnprocessedToolCalls` | number | legacy | Accepted for older configs; data-flow reduction and observed context cost are primary. |
+| `quantitativePolicy` | object | `{maxBytes: 8192, maxTokens: 4000, maxCharacters: 8192}` | Single policy source for static preflight and runtime budgets. |
+| `policy` | object | alias | User-facing alias for `quantitativePolicy`; when both are set they are unified with `policy` as source. |
+| `quantitativePolicy.maxBytes` / `policy.maxBytes` | number (bytes) | `8192` | Static preflight budget; also unifies the runtime offload budget when `readOffloadThreshold` is unset (see `resolveRuntimeByteBudget`). Max 1,000,000,000. |
+| `quantitativePolicy.maxTokens` / `policy.maxTokens` | number | `4000` | Token budget for token-unit bounds. Max 1,000,000,000. |
+| `quantitativePolicy.maxCharacters` / `policy.maxCharacters` | number | `8192` | Character budget (UTF-16 code units). Max 1,000,000,000. |
+| `readOffloadThreshold` | number (bytes) | `16384` | Runtime auto-offload budget; wins over `policy.maxBytes` when set. Clamped to 256–1,000,000,000; clamps surface via `ctx_status` warnings. |
+| `resultPolicy` | `"auto" \| "inline" \| "offload" \| "summarize"` | `"auto"` | `auto` previews/offloads by threshold; `inline` preserves all results (including errors); `offload` forces handles for successful results; `summarize` uses threshold-based deterministic structural compression with exact recovery (no model call). |
+| `errorCompactionThreshold` | number (bytes) | `4096` | Model-boundary errors at/above this size are compacted (min 256). |
+| `errorCompactionPreviewBytes` | number (bytes) | `4096` | Visible budget retained by a compacted error, including the recovery recipe (256–64,000). |
+| `offloadPreviewBytes` | number (bytes) | `2048` | Structural first-use handle preview budget (256–4,096). |
+| `runtimeAdvisoryThreshold` | number (bytes) | `0` | Fabric boundary results at/above this size get a one-line advisory; `0` disables nudges. |
+| `compactEditResults` | boolean | `true` | Compact recognized verbose 2 KB+ successful edit envelopes (diff/patch) into an acknowledgment + recovery handle. Set `false` to keep them inline. |
+| `notifyOnStart` | boolean | `false` | Opt into the session-start toast. |
+| `storeMaxBytes` | number (bytes) | `500000000` | Transient store cap; cannot exceed 500 MB. Newest write is never evicted; over-budget writes evict oldest first (LRU) after TTL sweep. |
+| `storeTtlMs` | number (ms) | `604800000` | Transient entry TTL (1 week). Remembered facts use a separate persistent namespace (no TTL, 5 MB budget). |
+| `compactStaleResults` | boolean | deprecated, ignored | Always effective `false`; already-exposed messages stay prefix-stable. Accepted so old configs still load. |
+| `nestedResultThreshold` | number | deprecated, ignored | Always effective `null`; internal Fabric provider values are never rewritten. Accepted so old configs still load. |
+
+Bad JSON in `.pi/context-engineer.json` does not throw: defaults load and a warning surfaces via `ctx_status`. Out-of-range numeric budgets are clamped (floored, min/max) with a `ctx_status` warning instead of failing startup.
+
+### Bytes vs tokens
+
+Prefer byte budgets. Static preflight defaults to 8 KB (`quantitativePolicy.maxBytes`) while the runtime auto-offload default is 16 KB (`readOffloadThreshold` / `DEFAULT_RUNTIME_OFFLOAD_BYTES`) because static estimates are conservative upper bounds and runtime measures actual UTF-8 bytes. Token equivalents are heuristic: ~4 chars/token, so 16 KB ≈ 4,000 tokens for ASCII. Multibyte UTF-8 inflates bytes faster than the heuristic implies, and boundary messages report bytes with the ASCII-biased token estimate in parentheses. Invalid `policy` objects are ignored with a `ctx_status` warning; per-budget maximum is 1,000,000,000.
+
+### Selection and compression notes
+
+- `ctx_read({ query })` is literal and case-sensitive by default. Set `regex: true` for a per-line JavaScript RegExp and/or `ignoreCase: true`. Invalid regex and storage failures reject at the Pi tool boundary with structured error diagnostics; internal handlers use `{ error, code, isError: true }`. Storage uses explicit `ok` status, so payloads and remembered facts beginning `Error:` remain valid evidence. Regex/ignore-case scans are bounded and report scan truncation.
+- Hierarchical inputs exceeding `maxChunks` fail **before model calls**, with `summary_input_budget_exceeded` and an exact recovery handle. Narrow the input or explicitly raise the budget; no first-chunk-only summary is substituted. Stored input reads stop after enough chunks to detect overflow. Structural/code stored summaries inspect a bounded 512 KB prefix and report truncation. Summaries are lossy navigation aids; recover original evidence when exact details matter.
+
 Project configuration is re-read when the file's modification time changes, so tuning does not require an extension reload. `/ce settings` shows effective values, including defaults.
 
 - `strict` or `blockUnboundedReturns` restores fail-closed static enforcement.
-- `resultPolicy` is `auto` (threshold-based), `inline` (never rewrite successful boundary results), `offload` (force addressable handles), or `summarize` (threshold-based structural summaries with recovery handles).
-- `errorCompactionThreshold` and `errorCompactionPreviewBytes` bound oversized model-facing parser/compiler errors; nested Fabric errors remain untouched.
+- `resultPolicy` is `auto` (threshold-based previews), `inline` (never rewrite boundary results, including errors), `offload` (force addressable handles for successful results), or `summarize` (threshold-based deterministic structural summaries with recovery handles; no child model call). `ctx_read` remains exempt from successful-result offloading to prevent recursive handles.
+- `errorCompactionThreshold` and `errorCompactionPreviewBytes` bound oversized model-facing errors, including the recovery recipe in the visible budget. Full original diagnostics are stored first; nested Fabric errors remain untouched.
+- `nestedResultThreshold` is deprecated and ignored (effective value `null`): Fabric owns its internal transport limits. CE never substitutes handles for internal provider values.
 - `runtimeAdvisoryThreshold: 0` disables repetitive size nudges; use a positive byte threshold to opt in.
-- `compactStaleResults` controls automatic compaction of already-used, addressable previews.
+- `compactStaleResults` is deprecated and ignored (effective value `false`, even in older configs that set it to `true`). CE never shortens already-exposed messages; use Pi session compaction to reduce accumulated history.
+- `compactEditResults` (default `true`) additionally offloads recognized successful 2 KB+ edit envelopes containing a verbose diff/patch. Set it to `false` to keep those results inline below the normal threshold. `resultPolicy: "inline"` still bypasses all successful-result rewriting.
 - `notifyOnStart` controls the session-start toast, which is off by default.
 
 Transient context-store entries default to one week (`604800000` ms) and 500 MB (`500000000` bytes). Remembered facts use a separate persistent store with no TTL and a 5 MB budget. Configured transient storage budgets cannot exceed the 500 MB cap. Payloads use a metadata index plus content-addressed private blobs; writes are atomic and cleanup removes expired, dangling, and over-budget entries.
@@ -236,10 +290,10 @@ The test suite includes more than 50 static data-flow cases plus live hook probe
 - `Promise.all`
 - bounded and unbounded Fovea calls
 - nested Fabric provider proxies
-- intermediate-result preservation
-- automatic final offload, one-use addressable previews, stale-result context compaction, serialized `ctx_read` envelope caps, and bounded query work
+- intermediate-result preservation, including large MCP/Fovea/CE provider proxies under every result policy
+- automatic final offload, prefix-stable previews across retries and branches, legacy config compatibility, serialized `ctx_read` envelope caps, and bounded query work
 - runtime-first versus strict preflight, bounded delegation, and deterministic `ctx_summarize` modes
-- content deduplication, UTF-8 ranges, and ripgrep-only brace parse repair
+- content deduplication, UTF-8 ranges, unchanged grep inputs (including valid ripgrep-only regex syntax), and lossless multi-text/error recovery
 - generated adversarial transformations for aliases, destructuring, callbacks, async wrappers, computed access, loops, and Promise aggregates
 - the explicit `src/context-effects.ts` registry used by the analyzer for source/select/compress/offload policy metadata, including current providers and PowerShell/process tools
 - JSON-path handle selection, structural previews, oversized error compaction, explicit result policies, and cross-runtime telemetry scopes
@@ -248,7 +302,7 @@ Run the generated adversarial suite directly with the normal `npm test` command.
 
 ## Benchmarking
 
-The deterministic proof harness compares raw baseline results with CE addressable storage, bounded selection, and hierarchical summarization:
+The deterministic plumbing harness compares raw payload exposure with CE addressable storage, bounded selection, and hierarchical summarization. Its known-marker validators and mocked models test mechanics, **not unchanged agent effectiveness**:
 
 ```sh
 npm run bench
@@ -263,6 +317,17 @@ Opt-in real runtime smoke tests launch the local `pi` CLI with CE and Fabric ext
 ```sh
 CE_RUN_E2E=1 PI_MODEL=openai-codex/gpt-5.6-luna npm run bench:e2e
 ```
+
+### Paired agent-effectiveness evaluation
+
+Unlike the plumbing suite, this opt-in harness runs paired CE-on/off agents on isolated copies of multi-file tasks with hidden validators, late evidence, and stale-handle failures. It uses the shipped automatic offload policy, does not supply a retrieval needle, and reports task outcomes, actual observed Usage/cache/cost, latency, recovery calls, and retries. Unknown measurements remain explicitly partial/unavailable. A small fixture suite does not establish general non-inferiority.
+
+```sh
+npm run verify:effectiveness  # offline fixture/scoring/accounting tests; also in npm test
+CE_RUN_EFFECTIVENESS=1 PI_MODEL=openai-codex/gpt-5.6-luna npm run bench:effectiveness
+```
+
+Real runs require explicit opt-in and a configured model; they can incur provider usage. Reports default to `.tmp/context-effectiveness.json`. See [`bench/README.md`](bench/README.md) for options and limitations.
 
 ## License
 

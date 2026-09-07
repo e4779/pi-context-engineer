@@ -1,5 +1,46 @@
 # Changelog
 
+## 0.6.0
+
+### Capability-preserving remediation
+
+- Added machine-readable child execution with observed Usage aggregation, completeness flags, supported-provider generation caps, turn/buffer limits, and minimal no-tools summarizer prompts. Codex uses an explicitly approximate streaming fallback rather than unsupported request fields; generation-limit truncation remains visible to Main.
+- Added 200+ deterministic remediation checks, including the actual Pi host error wrapper and a hung-callback deadline probe, plus an opt-in paired hidden-answer effectiveness harness. Kept legacy known-marker benchmarks explicitly labeled as plumbing checks, not proof of unchanged agent quality.
+
+- Made model-summary reduction strictly convergent with a binary tree, bounded input reads, a total model-call budget, and a whole-operation deadline. Insufficient input/call budgets fail before model work instead of substituting a first-chunk summary. Explicit direct summaries report coverage and continuation; model inputs and oversized delegated outputs retain exact recovery handles.
+- Added explicit storage success status so valid `Error:`-prefixed logs and remembered facts remain readable, searchable, summarizable, and recallable.
+- Corrected registered helper failures to reject through Pi's native error contract. Kept `ce_exec` BLOCK as an explicit successful validation diagnostic. Preserved full structured results and native rendering/state details rather than destructively slimming them.
+- Separated actual child-model Usage from estimated Main-context prevention. Recovery reads and internal helpers no longer double-count source savings; actual child usage remains independently visible when Fabric capture omits it from native totals.
+
+### Nonrestrictive runtime safety
+
+- Removed grep auto-repair and its exported repair helpers. CE never changes search semantics; Fabric remains responsible for catalog-argument repair.
+- Preserved all nested Fabric values under every result policy, including large provider proxies. Deprecated `nestedResultThreshold` (ignored, effective `null`).
+- Made default preflight advisory for all return estimates, including zero-source projections and oversized literals; explicit strict/blocking modes remain available.
+- Budgeted all model-facing text blocks together, preserving media order, bounded short notes, and indexed lossless multi-text recovery. Artifact metadata no longer bypasses the size guard.
+- Stored full errors before compaction, including recovery recipes in their byte budgets. Storage failures leave original results visible.
+- Implemented a distinct deterministic structural `summarize` boundary policy with recovery handles and no extra model call.
+- Propagated parent cancellation through delegation and hierarchical summarization; child timeout/abort terminates process trees, escalating to SIGKILL on POSIX. Added real local-process cancellation tests and runtime safety regressions to `npm test`.
+
+### Prefix-cache stability
+
+- Removed one-use preview compaction from the `context` hook: already-exposed offload and `ctx_read` results now stay byte-stable across repeated calls, retries, and branch changes. Initial tool-result offloading and edit acknowledgment compaction remain enabled.
+- Deprecated `compactStaleResults`; old configs remain accepted, but the setting is ignored and status/settings report `false`. Accumulated history is left to Pi session compaction.
+- Added regressions for stable model prefixes, mixed media, manual offloads, bounded reads, and legacy settings.
+
+### Model-boundary UX
+
+- Made `ctx_status` compact by default: one selected scope, no repeated sibling scopes or event/strategy breakdowns, and only the requested summary is computed. `detail: "full"` restores the previous all-scope diagnostic fields.
+- Prioritized useful nested JSON fields and small Fabric sectioned-YAML sections in bounded offload previews; excerpts retain provenance and never replace ordinary nested Pi values.
+- Added default compaction of recognized verbose successful edit envelopes from 2 KB, keeping the acknowledgment visible and the exact original diff/patch addressable. Added `compactEditResults` opt-out; inline policy and error handling remain unchanged.
+- Added regression coverage for mixed results, UTF-8 budgets, media preservation, exact read-back, compact/full status, and optional compaction.
+
+### Docs UX
+
+- Added a full `CeConfig` reference table (README + skill): every knob including `quantitativePolicy`/`policy` (`maxBytes`/`maxTokens`/`maxCharacters`), thresholds, `resultPolicy`, `compactEditResults`, `runtimeAdvisoryThreshold`, `notifyOnStart`, and deprecated ignored keys.
+- Documented byte-vs-token ASCII bias: budgets are UTF-8 bytes, token equivalents are ~bytes/4 heuristic; 8 KB static vs 16 KB runtime defaults explained; multibyte UTF-8 and 1B/64K/4K clamps noted with `ctx_status` warnings.
+- Documented `ctx_read` `regex`/`ignoreCase` (literal case-sensitive default; invalid regex rejects at the registered tool boundary with structured error diagnostics) and bounded `ctx_summarize` operation/input/call budgets with exact recovery and no implicit first-chunk fallback.
+
 ## 0.5.1
 
 ### Compatibility and boundary safety

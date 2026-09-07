@@ -1,126 +1,16 @@
 /**
- * Test the grep auto-repair and read auto-offload logic.
- * These are the two new code paths added in this round.
+ * Verify model-boundary offloading, prefix stability, helper tools and telemetry.
+ * Runtime safety and child cancellation have dedicated integration regressions.
  */
 
-import contextEngineer, { repairGrepInput, isLikelyRegexParseError } from "./index.js";
+import contextEngineer from "./index.js";
 import { ContextStore, DEFAULT_CONTEXT_STORE_TTL_MS, DEFAULT_MEMORY_STORE_MAX_BYTES, MAX_CONTEXT_STORE_BYTES } from "./store.js";
 import { ceToolMap } from "./tools.js";
 import { ContextTelemetry } from "./telemetry.js";
 import { mkdirSync, readFileSync, readdirSync, statSync, writeFileSync, utimesSync } from "node:fs";
 import { join } from "node:path";
 import assert from "node:assert/strict";
-
-// ---- Test grep auto-repair ----
-
-const grepTests: Array<{ name: string; input: Record<string, unknown>; expectRepaired: boolean }> = [
-  {
-    name: "unescaped parens: hydrateCart(",
-    input: { pattern: "hydrateCart(" },
-    expectRepaired: true,
-  },
-  {
-    name: "unclosed group: (?:hydrateCart(|loadLocalCart(",
-    input: { pattern: "(?:hydrateCart(|loadLocalCart(" },
-    expectRepaired: true,
-  },
-  {
-    name: "braces in assignment: state.cart = {};",
-    input: { pattern: "state.cart = {};" },
-    expectRepaired: true,
-  },
-  {
-    name: "lone opening brace accepted by JS but rejected by rg: return {",
-    input: { pattern: "return {" },
-    expectRepaired: true,
-  },
-  {
-    name: "already literal: no repair",
-    input: { pattern: "clearCustomerSession(", literal: true },
-    expectRepaired: false,
-  },
-  {
-    name: "clean regex: no repair needed",
-    input: { pattern: "function\\s+clearCustomerSession" },
-    expectRepaired: false,
-  },
-  {
-    name: "simple word: no repair needed",
-    input: { pattern: "clearCustomerSession" },
-    expectRepaired: false,
-  },
-  {
-    name: "unclosed group with alt: refreshCustomer|clearCustomerSession|logout(",
-    input: { pattern: "refreshCustomer|clearCustomerSession|logout(" },
-    expectRepaired: true,
-  },
-  // Regression: valid regexes must NEVER be repaired (previously the punctuation
-  // heuristic silently flipped them to literal searches).
-  {
-    name: "valid alternation: (a|b)",
-    input: { pattern: "(a|b)" },
-    expectRepaired: false,
-  },
-  {
-    name: "valid char class: [a-z]+\\.txt",
-    input: { pattern: "[a-z]+\\.txt" },
-    expectRepaired: false,
-  },
-  {
-    name: "valid trailing paren: function\\s+\\w+\\(",
-    input: { pattern: "function\\s+\\w+\\(" },
-    expectRepaired: false,
-  },
-  {
-    name: "valid anchored alternation: ^(GET|POST)$",
-    input: { pattern: "^(GET|POST)$" },
-    expectRepaired: false,
-  },
-  {
-    name: "valid brace quantifier: a{2,4}",
-    input: { pattern: "a{2,4}" },
-    expectRepaired: false,
-  },
-  {
-    name: "braces inside a character class: [{}]",
-    input: { pattern: "[{}]" },
-    expectRepaired: false,
-  },
-  {
-    name: "Unicode class braces: \\p{L}+",
-    input: { pattern: "\\p{L}+" },
-    expectRepaired: false,
-  },
-  {
-    name: "codepoint escape braces: \\x{41}",
-    input: { pattern: "\\x{41}" },
-    expectRepaired: false,
-  },
-  {
-    name: "escaped braces stay regex: state\\.cart\\s*=\\s*\\{\\};",
-    input: { pattern: "state\\.cart\\s*=\\s*\\{\\};" },
-    expectRepaired: false,
-  },
-];
-
-let grepPassed = 0;
-let grepFailed = 0;
-
-console.log("=== Grep Auto-Repair Tests ===\n");
-for (const test of grepTests) {
-  // Deep clone input so we don't mutate the test data
-  const input = JSON.parse(JSON.stringify(test.input));
-  const result = repairGrepInput(input);
-  const ok = result.repaired === test.expectRepaired;
-  const status = ok ? "[ok]" : "[FAIL]";
-  console.log(`${status} ${test.name}`);
-  console.log(`   expected repaired=${test.expectRepaired}, got repaired=${result.repaired}`);
-  if (result.repaired) {
-    console.log(`   literal set to: ${input.literal}`);
-  }
-  if (!ok) grepFailed++;
-  else grepPassed++;
-}
+import { editJson, editYaml } from "./verify-preview.js";
 
 // ---- Test read auto-offload ----
 
@@ -199,6 +89,7 @@ function checkHook(name: string, cond: boolean, detail = "") {
 type HookFn = (event: any, ctx: any) => Promise<any>;
 const hooks: Record<string, HookFn[]> = {};
 const registeredTools = new Map<string, any>();
+const registeredCommands = new Map<string, any>();
 const piStub: any = {
   on: (name: string, fn: HookFn) => {
     (hooks[name] ??= []).push(fn);
@@ -206,8 +97,7 @@ const piStub: any = {
   registerTool: (def: any) => {
     registeredTools.set(def.name, def);
   },
-  // The /ce command is a UI affordance; nothing to capture in headless tests.
-  registerCommand: (_name: string, _def: unknown) => {},
+  registerCommand: (name: string, def: any) => registeredCommands.set(name, def),
 };
 contextEngineer(piStub);
 
@@ -224,7 +114,10 @@ const callHook = async (name: string, event: any, cwd = hookCwd, extraContext: R
   let out: any;
   for (const fn of hooks[name] ?? []) {
     const result = await fn(event, { cwd, ...extraContext });
-    if (result !== undefined) out = result;
+    if (result !== undefined) {
+      out = { ...out, ...result };
+      if (name === "tool_result") event = { ...event, ...result };
+    }
   }
   return out;
 };
@@ -242,6 +135,8 @@ const ctrl = await callHook("tool_result", {
 checkHook("top-level large result is offloaded", ctrl?.details?.ce_offloaded === true);
 const ctrlText = ctrl?.content?.find((item: any) => item.type === "text")?.text ?? "";
 checkHook("offload message includes a copyable model-facing ctx_read recipe", ctrlText.includes("ctx_read({ id:") && !ctrlText.includes("extensions.ctx_read({ id:"));
+const fabricRecipe = await callHook("tool_result", { toolCallId: "recipe-parent", toolName: "fabric_exec", input: {}, content: [{ type: "text", text: BIG }] });
+checkHook("Fabric boundary recovery uses the available extensions namespace", String(fabricRecipe?.content?.[0]?.text).includes("extensions.ctx_read({ id:"));
 checkHook("structural offload preview stays bounded", Buffer.byteLength(ctrlText, "utf8") < 3200);
 
 const addressableMessage = {
@@ -253,16 +148,48 @@ const addressableMessage = {
   isError: false,
   timestamp: Date.now(),
 };
-const firstAddressableContext = await callHook("context", { messages: [addressableMessage] });
-const repeatedAddressableContext = await callHook("context", { messages: [addressableMessage] });
-const compactedAddressableText = repeatedAddressableContext?.messages?.[0]?.content?.[0]?.text ?? "";
-checkHook("addressable preview is preserved for its first model call", firstAddressableContext === undefined);
-checkHook(
-  "repeated addressable preview compacts to a re-readable handle",
-  compactedAddressableText.includes("preview compacted after use") &&
-    compactedAddressableText.includes(ctrl?.details?.ce_handle) &&
-    Buffer.byteLength(compactedAddressableText, "utf8") < Buffer.byteLength(ctrlText, "utf8") / 2,
-);
+// Once a result reaches Main, later requests must retain the same prefix.
+// Shortening a previously exposed preview invalidates provider prompt caches.
+async function checkStableContextPrefix(label: string, messages: any[], cwd = hookCwd) {
+  const snapshot = JSON.stringify(messages);
+  const continuations = [
+    [], // first exposure
+    [], // retry / repeated context event
+    [{ role: "assistant", content: [{ type: "text", text: "Continue inspecting." }], timestamp: 1 }],
+    [{ role: "user", content: [{ type: "text", text: "Inspect another branch." }], timestamp: 2 }],
+    [], // return to the original branch
+  ];
+  for (const [index, tail] of continuations.entries()) {
+    const input = structuredClone([...messages, ...tail]);
+    const before = JSON.stringify(input);
+    const result = await callHook("context", { messages: input }, cwd);
+    const visible = result?.messages ?? input;
+    checkHook(`${label}: stable model prefix on request ${index + 1}`,
+      JSON.stringify(visible.slice(0, messages.length)) === snapshot &&
+      JSON.stringify(visible) === before && JSON.stringify(input) === before);
+  }
+  checkHook(`${label}: session history remains unchanged`, JSON.stringify(messages) === snapshot);
+}
+await checkStableContextPrefix("automatic offload preview", [addressableMessage]);
+await callHook("session_start", {});
+await checkStableContextPrefix("resumed offload preview", [addressableMessage]);
+checkHook("CE does not install a historical context rewrite hook", (hooks.context?.length ?? 0) === 0);
+const mediaMessage = { ...addressableMessage, toolCallId: "prefix-media", content: [
+  ...addressableMessage.content,
+  { type: "image", data: "aGVsbG8=", mimeType: "image/png" },
+] };
+await checkStableContextPrefix("mixed text/image preview", [mediaMessage]);
+for (const compactStaleResults of [true, false]) {
+  const legacyCwd = `/tmp/pi-ce-prefix-${compactStaleResults}-${Date.now()}`;
+  mkdirSync(join(legacyCwd, ".pi"), { recursive: true });
+  writeFileSync(join(legacyCwd, ".pi", "context-engineer.json"), JSON.stringify({ compactStaleResults }));
+  await checkStableContextPrefix(`legacy compactStaleResults=${compactStaleResults}`, [addressableMessage], legacyCwd);
+  const status = await registeredTools.get("ctx_status").execute("legacy-status", {}, undefined, undefined, { cwd: legacyCwd });
+  checkHook(`legacy setting ${compactStaleResults}: status reports effective false`, JSON.parse(status.content[0].text).compactStaleResults === false);
+  let settings = "";
+  await registeredCommands.get("ce").handler("settings", { cwd: legacyCwd, ui: { notify: (text: string) => { settings = text; } } });
+  checkHook(`legacy setting ${compactStaleResults}: settings reports effective false`, JSON.parse(settings).compactStaleResults === false);
+}
 
 // While a program runs, inner results are intermediate values consumed by
 // program code and must arrive byte-for-byte intact.
@@ -276,28 +203,16 @@ const inner = await callHook("tool_result", {
 });
 checkHook("inner read passes through untouched while program runs", inner === undefined);
 
-// Fabric's documented provider proxy is safe to replace even inside an active
-// program because its patched details.result becomes the QuickJS value.
-const nestedProxy = await callHook("tool_result", {
-  toolCallId: "fabric_nested_provider_1",
-  toolName: "mcp.test.search",
-  input: { query: "large" },
-  details: {
-    kind: "pi-fabric.tool-result-proxy.v1",
-    ref: "mcp.test.search",
-    result: { output: BIG },
-  },
+// Provider proxies carry program data, even when their serialized size is large.
+const providerValue = { rows: [{ id: 7, output: BIG }] };
+const providerEvent = {
+  toolCallId: "fabric_nested_provider_1", toolName: "mcp.test.search", input: { query: "large" },
+  details: { kind: "pi-fabric.tool-result-proxy.v1", ref: "mcp.test.search", result: providerValue },
   content: [{ type: "text", text: BIG }],
-});
-checkHook(
-  "nested Fabric provider result is offloaded structurally",
-  nestedProxy?.details?.result?.contextEngineerTruncated === true && typeof nestedProxy?.details?.result?.handle === "string",
-);
-const nestedHandle = nestedProxy?.details?.result?.handle as string | undefined;
-checkHook(
-  "nested provider payload is recoverable from its handle",
-  Boolean(nestedHandle && new ContextStore(hookCwd).read(nestedHandle, { query: "bbbb" }).totalBytes > 0),
-);
+};
+const nestedProxy = await callHook("tool_result", providerEvent);
+checkHook("nested provider result is untouched", nestedProxy === undefined);
+checkHook("nested consumer can still map the original rows", providerEvent.details.result === providerValue && providerValue.rows.map(row => row.id).join() === "7");
 
 const fe1 = await callHook("tool_result", {
   toolCallId: "fe1",
@@ -446,13 +361,7 @@ if (ctxReadDef) {
     isError: false,
     timestamp: Date.now(),
   };
-  await callHook("context", { messages: [ctxReadMessage] }, capCwd);
-  const repeatedReadContext = await callHook("context", { messages: [ctxReadMessage] }, capCwd);
-  checkCtl(
-    "used ctx_read output compacts while retaining its source handle",
-    String(repeatedReadContext?.messages?.[0]?.content?.[0]?.text).includes(capEntry.id) &&
-      String(repeatedReadContext?.messages?.[0]?.content?.[0]?.text).includes("offset: 0"),
-  );
+  await checkStableContextPrefix("ctx_read result", [ctxReadMessage], capCwd);
   const outNext = await ctxReadDef.execute(
     "t1-next",
     { id: capEntry.id, offset: p1.nextOffset, length: 256 },
@@ -632,28 +541,28 @@ checkCtl("ctx_offload tool is registered", Boolean(offDef));
 if (offDef) {
   const o1 = await offDef.execute("o1", { key: "k1", source: "bash", data: "payload-one" }, undefined, undefined, { cwd: capCwd });
   checkCtl("canonical { key, source, data } works", o1?.details?.id !== undefined);
+  const nestedManual = await offDef.execute("fabric_manual_recipe", { key: "nested-manual", data: "nested payload" }, undefined, undefined, { cwd: capCwd });
+  checkCtl("nested manual offload points at extensions.ctx_read", nestedManual.content[0].text.includes("extensions.ctx_read({ id:"));
   const manualMessage = { role: "toolResult", toolCallId: "manual-o1", toolName: "ctx_offload", content: o1.content, details: o1.details, isError: false, timestamp: Date.now() };
-  await callHook("context", { messages: [manualMessage] }, capCwd);
-  const repeatedManual = await callHook("context", { messages: [manualMessage] }, capCwd);
-  checkCtl("manual offload preview compacts after first use", String(repeatedManual?.messages?.[0]?.content?.[0]?.text).includes(String(o1?.details?.id)));
+  await checkStableContextPrefix("manual offload preview", [manualMessage], capCwd);
   const o2 = await offDef.execute("o2", { key: "k2", text: "payload-two" }, undefined, undefined, { cwd: capCwd });
   checkCtl("{ key, text } alias works", o2?.details?.id !== undefined);
   const o3 = await offDef.execute("o3", { key: "k3", content: "payload-three" }, undefined, undefined, { cwd: capCwd });
   checkCtl("{ key, content } alias works", o3?.details?.id !== undefined);
-  const o4 = await offDef.execute("o4", { key: "k4" }, undefined, undefined, { cwd: capCwd });
-  checkCtl("missing payload errors with a signature hint", o4?.isError === true && String(o4?.content?.[0]?.text).includes("data"));
+  await assert.rejects(() => offDef.execute("o4", { key: "k4" }, undefined, undefined, { cwd: capCwd }), /requires a payload.*data/);
+  checkCtl("missing payload rejects with a signature hint", true);
 }
 
-// ---- CE tool details are slimmed (no payload duplication into context) ----
+// ---- Exact structured results survive nested execution ----
 
-console.log("\n=== CE Details Slimming ===\n");
+console.log("\n=== CE Structured Result Preservation ===\n");
 const sumDef = registeredTools.get("ctx_summarize");
 checkCtl("ctx_summarize tool is registered", Boolean(sumDef));
 if (sumDef) {
   const bigText = "lorem-ipsum-dolor-line\n".repeat(300); // ~6.9KB of repetitive text
   const sum = await sumDef.execute("s1", { text: bigText, mode: "structural", maxTokens: 400 }, undefined, undefined, { cwd: capCwd });
-  const detJson = JSON.stringify(sum.details ?? {});
-  checkCtl("details no longer duplicate the summarized payload", !detJson.includes("lorem-ipsum-dolor-line"));
+  assert.deepEqual(sum.details.result, JSON.parse(sum.content[0].text));
+  checkCtl("details retain the exact summary for programmatic consumers", true);
   checkCtl("content still carries the full summary once", typeof sum.content?.[0]?.text === "string" && sum.content[0].text.length > 100);
 }
 
@@ -752,6 +661,37 @@ const summarizedResult = await callHook("tool_result", {
 }, summarizeCwd);
 checkHook("explicit summarize policy returns a structural JSON handle", summarizedResult?.details?.ce_offloaded === true && String(summarizedResult?.content?.[0]?.text).includes("JSON object") && String(summarizedResult?.content?.[0]?.text).includes("ctx_read({ id:"));
 
+// ---- Compact acknowledgments and mixed-result previews ----
+console.log("\n=== Boundary UX ===\n");
+for (const [format, text] of [["json", editJson], ["yaml", editYaml]]) {
+  const image = { type: "image", data: "aW1hZ2U=", mimeType: "image/png" };
+  const event = { toolCallId: `ack-${format}`, toolName: "fabric_exec", input: { code: "return await pi.edit({path:'example.ts',old:'a',new:'b'});" }, content: [{ type: "text", text }, image, { type: "text", text: "independent note" }] };
+  const result = await callHook("tool_result", event);
+  checkHook(`${format} successful edit acknowledgment compacts below the ordinary threshold`, Buffer.byteLength(text) < 16384 && result?.details?.ce_compacted_edit_ack === true);
+  checkHook(`${format} edit status/path stay inline with recovery handle`, result?.content?.[0]?.text.includes("Successfully replaced 3 block(s)") && result.content[0].text.includes("/project/src/example.ts") && result.content[0].text.includes("ctx_read({ id:"));
+  checkHook(`${format} media and sibling text are preserved exactly`, result?.content?.[1] === image && JSON.stringify(result?.content?.[2]) === JSON.stringify(event.content[2]));
+  const stored = new ContextStore(hookCwd).read(result.details.ce_handle, { length: Number.MAX_SAFE_INTEGER });
+  checkHook(`${format} complete original diff/patch remains retrievable`, JSON.parse(stored.content).textBlocks[0].text === text);
+  const inner = await callHook("tool_result", { ...event, toolCallId: `fabric_ack-inner-${format}`, toolName: "edit" });
+  checkHook(`${format} ordinary nested Pi result remains byte-for-byte untouched`, inner === undefined);
+  const inline = await callHook("tool_result", event, inlineCwd);
+  checkHook(`${format} inline escape hatch preserves verbose acknowledgments`, inline === undefined);
+}
+const noCompactCwd = "/tmp/pi-ce-no-edit-compact-" + Date.now();
+mkdirSync(join(noCompactCwd, ".pi"), { recursive: true });
+writeFileSync(join(noCompactCwd, ".pi", "context-engineer.json"), JSON.stringify({ compactEditResults: false }));
+const ackEvent = { toolCallId: "edit-optout", toolName: "fabric_exec", input: {}, content: [{ type: "text", text: editJson }] };
+checkHook("edit compaction opt-out leaves subthreshold acknowledgments inline", await callHook("tool_result", ackEvent, noCompactCwd) === undefined);
+const failedAck = await callHook("tool_result", { ...ackEvent, isError: true });
+checkHook("error results use error handling, not successful-edit compaction", failedAck?.details?.ce_compacted_edit_ack === undefined && failedAck?.details?.ce_error_compacted === true && typeof failedAck?.details?.ce_handle === "string");
+checkHook("small edit acknowledgments remain inline", await callHook("tool_result", { ...ackEvent, content: [{ type: "text", text: JSON.stringify({ ok: true, output: "Successfully replaced", details: { diff: "tiny" } }) }] }) === undefined);
+const mixedBoundary = JSON.stringify({ catalog: Array.from({ length: 3000 }, (_, i) => ({ name: `tool${i}`, schema: "schema".repeat(10) })), check: { ok: true, path: "library.blend", cameras: 4 } });
+const mixedResult = await callHook("tool_result", { toolCallId: "mixed-boundary", toolName: "fabric_exec", input: {}, content: [{ type: "text", text: mixedBoundary }] });
+checkHook("large mixed boundary preserves independently useful nested facts", mixedResult?.content?.[0]?.text.includes("$.check.ok: true") && mixedResult.content[0].text.includes("$.check.cameras: 4"));
+checkHook("mixed boundary still stores the entire exact payload", new ContextStore(hookCwd).read(mixedResult.details.ce_handle, { length: Buffer.byteLength(mixedBoundary) }).content === mixedBoundary);
+const selectedMixed = new ContextStore(hookCwd).read(mixedResult.details.ce_handle, { jsonPath: "$.check.path" });
+checkHook("preview field paths can be selected through ctx_read", selectedMixed.content === '"library.blend"');
+
 // ---- ctx_status reports policy state ----
 
 console.log("\n=== ctx_status ===\n");
@@ -761,12 +701,32 @@ if (statusDef) {
   const st = await statusDef.execute("st1", {}, undefined, undefined, { cwd: capCwd });
   const parsed = JSON.parse(st.content[0].text);
   checkCtl(
-    "ctx_status exposes thresholds, policy, and telemetry scopes",
-    parsed.enabled === true && parsed.resultPolicy === "auto" && parsed.runtimeAdvisoryThreshold === 0 && parsed.blockUnboundedReturns === false && parsed.compactStaleResults === true && typeof parsed.readOffloadThreshold === "number" && typeof parsed.errorCompactionThreshold === "number" && typeof parsed.policy === "string" && typeof parsed.runtime?.events === "number" && typeof parsed.session?.mainTokensPrevented === "number" && typeof parsed.lifetime?.storeTokensWritten === "number" && parsed.telemetryScope === "session",
+    "ctx_status exposes policy and one compact scope by default",
+    parsed.enabled === true && parsed.resultPolicy === "auto" && parsed.compactEditResults === true && parsed.compactStaleResults === false && typeof parsed.readOffloadThreshold === "number" && typeof parsed.policy === "string" && parsed.detail === "compact" && parsed.telemetryScope === "session" && typeof parsed.summary?.mainTokensPrevented === "number" && parsed.summary?.byStrategy === undefined && parsed.summary?.largest === undefined && parsed.runtime === undefined && parsed.session === undefined && parsed.lifetime === undefined,
   );
-  const lifetimeStatus = await statusDef.execute("st2", { scope: "lifetime" }, undefined, undefined, { cwd: capCwd });
-  const lifetimeParsed = JSON.parse(lifetimeStatus.content[0].text);
-  checkCtl("ctx_status can emphasize lifetime telemetry", lifetimeParsed.telemetryScope === "lifetime" && lifetimeParsed.summary?.scope === "lifetime" && lifetimeParsed.lifetime?.scope === "lifetime");
+  const statusBytes = Buffer.byteLength(JSON.stringify(st));
+  checkCtl("compact status envelope fits comfortably below default offload budget", statusBytes < 6000, `bytes=${statusBytes}`);
+  const fullStatus = await statusDef.execute("st-full", { detail: "full" }, undefined, undefined, { cwd: capCwd });
+  const full = JSON.parse(fullStatus.content[0].text);
+  checkCtl("full detail restores all telemetry scopes and breakdowns", full.detail === "full" && typeof full.runtime?.events === "number" && typeof full.session?.mainTokensPrevented === "number" && typeof full.lifetime?.storeTokensWritten === "number" && typeof full.summary?.byStrategy === "object");
+  checkCtl("compact status materially reduces the full envelope", statusBytes < Buffer.byteLength(JSON.stringify(fullStatus)) * .65);
+  const boundaryStatus = await callHook("tool_result", { toolCallId: "compact-status-boundary", toolName: "fabric_exec", input: {}, content: [{ type: "text", text: JSON.stringify(st) }] });
+  checkCtl("compact status does not offload itself at the default boundary", boundaryStatus === undefined);
+  for (const scope of ["runtime", "session", "lifetime"]) {
+    const status = await statusDef.execute(`st-${scope}`, { scope }, undefined, undefined, { cwd: capCwd });
+    const body = JSON.parse(status.content[0].text);
+    checkCtl(`compact status selects ${scope} without sibling scopes`, body.telemetryScope === scope && body.summary?.scope === scope && body.runtime === undefined && body.session === undefined && body.lifetime === undefined);
+  }
+  let summaryCalls = 0;
+  const originalSummary = ContextTelemetry.prototype.summary;
+  ContextTelemetry.prototype.summary = function (...args) { summaryCalls++; return originalSummary.apply(this, args); };
+  try {
+    await statusDef.execute("st-count", {}, undefined, undefined, { cwd: capCwd });
+    checkCtl("default status computes only the requested scope", summaryCalls === 1, `summary calls=${summaryCalls}`);
+  } finally { ContextTelemetry.prototype.summary = originalSummary; }
+  const lifetimeFull = await statusDef.execute("st2", { scope: "lifetime", detail: "full" }, undefined, undefined, { cwd: capCwd });
+  const lifetimeParsed = JSON.parse(lifetimeFull.content[0].text);
+  checkCtl("full status can emphasize lifetime telemetry", lifetimeParsed.telemetryScope === "lifetime" && lifetimeParsed.summary?.scope === "lifetime" && lifetimeParsed.lifetime?.scope === "lifetime");
 }
 
 // ---- Quiet session startup ----
@@ -785,15 +745,14 @@ checkCtl("session-start notification remains opt-in", startupNotifications === 1
 // ---- Summary ----
 
 console.log("\n=== Summary ===");
-console.log(`Grep auto-repair: ${grepPassed} passed, ${grepFailed} failed`);
 console.log(`Read auto-offload: ${offloadPassed} passed, ${offloadFailed} failed`);
 console.log(`Boundary vs intermediate: ${hookChecks - hookFailed} passed, ${hookFailed} failed`);
 console.log(`ctx_read self-cap: ${ctlChecks - ctlFailed} passed, ${ctlFailed} failed`);
 
-const totalFailed = grepFailed + offloadFailed + hookFailed + ctlFailed;
+const totalFailed = offloadFailed + hookFailed + ctlFailed;
 if (totalFailed > 0) {
   console.log(`\n${totalFailed} test(s) failed`);
-  process.exit(1);
+  process.exitCode = 1;
 } else {
   console.log(`\nAll tests passed`);
 }

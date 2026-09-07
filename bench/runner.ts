@@ -246,11 +246,16 @@ async function ceMetrics(definition: CaseDefinition, payloads: string[], baselin
           return prompt.includes(definition.marker) ? `Finding: ${definition.marker}` : "No target marker in this chunk.";
         },
       } as any;
+      // The legacy descriptor predates the 1,024-token floor and explicit
+      // maxChunks overflow. Keep this successful summary plumbing case bounded
+      // but within the new contract; verify the overflow contract separately.
       const summary = await summaryTool.handler({
         id: handles[0].id,
         mode: definition.summaryMode ?? "code",
         maxTokens: definition.maxTokens ?? 180,
-        maxInputTokens: definition.maxInputTokens ?? 1024,
+        maxInputTokens: Math.max(definition.maxInputTokens ?? 1024, 8192),
+        maxChunks: 64,
+        maxCalls: 128,
       }, context);
       mainBoundary = { handle: previews[0], summary };
       finalAnswerCorrect = contains(summary, definition.marker);
@@ -299,8 +304,15 @@ function loadCases(): CaseDefinition[] {
     .map((name) => JSON.parse(readFileSync(join(directory, name), "utf8")) as CaseDefinition);
 }
 
-const iterations = Math.max(1, Math.min(30, Math.floor(Number(process.env.CE_BENCHMARK_ITERATIONS) || 3)));
-const warmupIterations = Math.max(0, Math.min(10, Math.floor(Number(process.env.CE_BENCHMARK_WARMUP) || 1)));
+function benchmarkEnvInteger(name: string, fallback: number): number {
+  const raw = process.env[name];
+  if (raw === undefined || raw.trim() === "") return fallback;
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) ? Math.floor(parsed) : fallback;
+}
+
+const iterations = Math.max(1, Math.min(30, benchmarkEnvInteger("CE_BENCHMARK_ITERATIONS", 3)));
+const warmupIterations = Math.max(0, Math.min(10, benchmarkEnvInteger("CE_BENCHMARK_WARMUP", 1)));
 const rows: BenchmarkReportRow[] = [];
 for (const definition of loadCases()) {
   const payloads = payloadsFor(definition);

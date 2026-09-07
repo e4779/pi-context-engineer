@@ -14,11 +14,22 @@
 import { randomUUID } from "node:crypto";
 import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
+import type { Usage } from "@earendil-works/pi-ai";
+import { mergeUsage, readUsage } from "./usage.js";
 
 export type ContextStrategy = "PASS" | "WARN" | "BLOCK" | "WRITE" | "SELECT" | "COMPRESS" | "ISOLATE";
 export type TelemetryScope = "runtime" | "session" | "lifetime";
 
-export interface ContextEvent {
+export interface ChildUsageFields {
+  /** Actual provider-reported usage, not a byte/token estimate. */
+  childUsage?: Usage;
+  /** False means some or all usage was unavailable, never free work. */
+  childUsageComplete?: boolean;
+  /** False for Fabric captures that drop nested Usage from native session totals. */
+  usageInParent?: boolean;
+}
+
+export interface ContextEvent extends ChildUsageFields {
   version: 2;
   timestamp: string;
   sessionId: string;
@@ -71,10 +82,15 @@ export interface ContextSummary {
   reductionRatio: number;
   mainContextReductionRatio: number;
   byStrategy: Record<string, StrategySummary>;
+  childCalls: number;
+  childUsage?: Usage;
+  childUsageComplete?: boolean;
+  /** Add only this usage to native parent totals to avoid double counting. */
+  childUsageOutsideParent?: Usage;
   largest?: ContextEvent;
 }
 
-export interface RecentContextEvent {
+export interface RecentContextEvent extends ChildUsageFields {
   timestamp: string;
   strategy: ContextStrategy;
   tool: string;
@@ -95,6 +111,16 @@ function estimateTokens(charsOrBytes: number): number {
 
 function safeNumber(value: unknown): number {
   return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : 0;
+}
+
+function childUsageFields(value: { childUsage?: unknown; childUsageComplete?: unknown; usageInParent?: unknown }): ChildUsageFields {
+  if (value.childUsageComplete === undefined && value.childUsage === undefined) return {};
+  const childUsage = readUsage(value.childUsage);
+  return {
+    ...(childUsage ? { childUsage } : {}),
+    childUsageComplete: childUsage !== undefined && value.childUsageComplete === true,
+    ...(typeof value.usageInParent === "boolean" ? { usageInParent: value.usageInParent } : {}),
+  };
 }
 
 function isStrategy(value: unknown): value is ContextStrategy {
@@ -118,7 +144,7 @@ export class ContextTelemetry {
 
   record(
     workspaceRoot: string,
-    event: {
+    event: ChildUsageFields & {
       strategy: ContextStrategy;
       tool: string;
       sourceBytes?: number;
@@ -161,6 +187,7 @@ export class ContextTelemetry {
         mainTokensPrevented,
         mainTokensInjected,
         storeTokensWritten: safeNumber(event.storeTokensWritten),
+        ...childUsageFields(event),
         ...(event.provider ? { provider: event.provider.slice(0, 80) } : {}),
         ...(event.handle ? { handle: event.handle.slice(0, 120) } : {}),
         ...(event.note ? { note: event.note.replace(/[\r\n]+/g, " ").slice(0, 240) } : {}),
@@ -168,6 +195,27 @@ export class ContextTelemetry {
       const path = this.path(workspaceRoot);
       appendFileSync(path, JSON.stringify(item) + "\n", "utf8");
       this.trimIfNeeded(path);
+    } catch {
+      // Telemetry must never interfere with tool execution.
+    }
+  }
+
+  /**
+   * Storage-failure note: records that a store write/read failed without
+   * hiding the already-executed result. Never throws. Callers (tool_result
+   * offload, ctx_offload) invoke this in their catch block so failures are
+   * visible in session/lifetime summaries instead of silent.
+   */
+  recordStorageFailure(workspaceRoot: string, tool: string, detail?: unknown): void {
+    try {
+      const message = detail instanceof Error ? detail.message : typeof detail === "string" ? detail : "store unavailable";
+      this.record(workspaceRoot, {
+        strategy: "WRITE",
+        tool,
+        sourceBytes: 0,
+        visibleBytes: 0,
+        note: `storage-failure: ${message}`.slice(0, 240),
+      });
     } catch {
       // Telemetry must never interfere with tool execution.
     }
@@ -230,6 +278,9 @@ export class ContextTelemetry {
       if (!largest || event.mainTokensPrevented > largest.mainTokensPrevented) largest = event;
     }
 
+    const childEvents = events.filter(event => event.childUsageComplete !== undefined);
+    const childUsage = mergeUsage(...childEvents.map(event => event.childUsage));
+    const childUsageOutsideParent = mergeUsage(...childEvents.filter(event => event.usageInParent === false).map(event => event.childUsage));
     const potentialMainTokens = mainTokensPrevented + mainTokensInjected;
     const mainContextReductionRatio = potentialMainTokens > 0 ? mainTokensPrevented / potentialMainTokens : 0;
     return {
@@ -247,6 +298,10 @@ export class ContextTelemetry {
       reductionRatio: mainContextReductionRatio,
       mainContextReductionRatio,
       byStrategy,
+      childCalls: childEvents.length,
+      ...(childUsage ? { childUsage } : {}),
+      ...(childEvents.length ? { childUsageComplete: childEvents.every(event => event.childUsageComplete === true) } : {}),
+      ...(childUsageOutsideParent ? { childUsageOutsideParent } : {}),
       ...(largest ? { largest } : {}),
     };
   }
@@ -266,6 +321,7 @@ export class ContextTelemetry {
         mainTokensPrevented: event.mainTokensPrevented,
         mainTokensInjected: event.mainTokensInjected,
         storeTokensWritten: event.storeTokensWritten,
+        ...childUsageFields(event),
         ...(event.note ? { note: event.note } : {}),
         ...(event.handle ? { handle: event.handle } : {}),
       }));
@@ -326,6 +382,7 @@ export class ContextTelemetry {
       mainTokensPrevented,
       mainTokensInjected: raw.mainTokensInjected === undefined ? visibleTokens : safeNumber(raw.mainTokensInjected),
       storeTokensWritten: safeNumber(raw.storeTokensWritten),
+      ...childUsageFields(raw),
       ...(typeof raw.provider === "string" ? { provider: raw.provider } : {}),
       ...(typeof raw.handle === "string" ? { handle: raw.handle } : {}),
       ...(typeof raw.note === "string" ? { note: raw.note } : {}),

@@ -4,6 +4,7 @@ import { dirname } from "node:path";
 import { performance } from "node:perf_hooks";
 import { analyzeProgram } from "../src/analyzer.js";
 
+/** Deterministic policy-plumbing case; `correct` is not agent answer quality. */
 interface PolicyBenchmarkCase {
   id: string;
   program: string;
@@ -123,16 +124,16 @@ const report = {
 const outputPath = process.env.POLICY_BENCHMARK_OUT ?? ".tmp/policy-benchmark.json";
 mkdirSync(dirname(outputPath), { recursive: true });
 writeFileSync(outputPath, JSON.stringify(report, null, 2) + "\n");
-console.log("# v0.5 quantitative policy benchmark");
+console.log("# v0.5 quantitative policy plumbing check");
 console.log(`Iterations: ${iterations}`);
-console.log("| Case | v0.4 | v0.5 expected | v0.5 actual | Decision | Bound | Correct |");
+console.log("| Case | v0.4 | v0.5 expected | v0.5 actual | Decision | Bound | Policy check |");
 console.log("| --- | :---: | :---: | :---: | --- | --- | :---: |");
 for (const row of rows) {
   const boundText = row.bound && row.bound.kind !== "unknown" ? `${row.bound.kind} ${row.bound.value} ${row.bound.unit}` : "unknown";
   console.log(`| ${row.id} | ${row.v04} | ${row.expectedV05} | ${row.actualV05} | ${row.actualDecision} | ${boundText} | ${row.correct ? "yes" : "no"} |`);
 }
 console.log("");
-console.log(`- Correctness: ${report.totals.correct}`);
+console.log(`- Policy checks: ${report.totals.correct} (deterministic static analysis, not agent effectiveness).`);
 console.log(`- Intentional v0.5 changes: ${report.totals.intentionalChanges}`);
 console.log(`- Legacy parity: ${report.totals.legacyParity}`);
 console.log(`- Unexpected differences: ${report.totals.unexpectedDifferences}`);

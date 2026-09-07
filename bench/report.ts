@@ -10,6 +10,7 @@ export interface BenchmarkEnvironment {
   warmupIterations: number;
 }
 
+/** Legacy deterministic plumbing metrics. Boolean checks are marker/selection checks, not agent answer quality. */
 export interface BenchmarkMetrics {
   mode: "baseline" | "ce";
   /** Total Main-context exposure; input + output. */
@@ -25,12 +26,15 @@ export interface BenchmarkMetrics {
   diskBytesWritten: number;
   bytesOffloaded: number;
   ctxReadBytesRetrieved: number;
+  /** Legacy marker/selection check, not a model final-answer score. */
   finalAnswerCorrect: boolean;
+  /** Legacy deterministic plumbing completion, not an agent task outcome. */
   taskCompleted: boolean;
   mainTokensPrevented: number;
   extraInternalTokens: number;
   mainTokensInjected: number;
   contextEfficiency: number;
+  /** Legacy name: savings conditional on the deterministic plumbing check. */
   qualityAdjustedSavings: number;
 }
 
@@ -83,14 +87,15 @@ export function renderMarkdown(report: BenchmarkReport): string {
   const totalEfficiency = totalSaved / Math.max(1, totalInternal + totalInjected);
 
   const lines = [
-    `# Context Engineer benchmark`,
+    `# Deterministic context-plumbing benchmark`,
     `Generated: ${report.generatedAt}`,
     `Environment: sourceCommit ${report.environment.sourceCommit}${report.environment.dirty ? " (dirty)" : ""}; Node ${report.environment.nodeVersion}; Pi ${report.environment.piVersion ?? "unknown"}; Fabric ${report.environment.fabricVersion ?? "unknown"}; model ${report.environment.model ?? "none"}.`,
     `Iterations: ${report.environment.iterations} (warmup ${report.environment.warmupIterations}).`,
     ``,
     `Each case runs a raw-result baseline and the same deterministic workload with CE storage/selection/compression.`,
+    `This suite measures boundary plumbing and known-marker/selection retention only; it does not run a Pi agent, measure answer effectiveness, or establish non-inferiority.`,
     ``,
-    `| Case | Baseline Main | CE Main | Prevented | CE internal | Efficiency | CE median ms | CE p95 ms | Correct | Disk bytes |`,
+    `| Plumbing case | Baseline Main | CE Main | Prevented | CE internal | Efficiency | CE median ms | CE p95 ms | Plumbing check | Disk bytes |`,
     `| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | :---: | ---: |`,
   ];
   for (const row of rows) {
@@ -101,9 +106,9 @@ export function renderMarkdown(report: BenchmarkReport): string {
     `## Totals`,
     ``,
     `- Main context: ${number(totalBaseline)} → ${number(totalCe)} tokens (${number(totalSaved)} prevented; ${percent(totalSaved / Math.max(1, totalBaseline))} reduction).`,
-    `- Quality-adjusted savings: ${number(rows.reduce((sum, row) => sum + row.ce.qualityAdjustedSavings, 0))} tokens.`,
-    `- CE success: ${totalCorrect}/${rows.length} cases.`,
-    `- Context efficiency: ${ratio(totalEfficiency)} (prevented / (extra internal + Main tokens injected)).`,
+    `- Savings conditional on a deterministic plumbing check: ${number(rows.reduce((sum, row) => sum + row.ce.qualityAdjustedSavings, 0))} tokens; this is not answer-quality evidence.`,
+    `- Deterministic plumbing checks: ${totalCorrect}/${rows.length} cases.`,
+    `- Context efficiency: ${ratio(totalEfficiency)} (prevented / (extra internal + Main tokens injected)); no agent-quality conclusion is implied.`,
     `- CE disk bytes written: ${number(rows.reduce((sum, row) => sum + row.ce.diskBytesWritten, 0))}; logical bytes offloaded: ${number(rows.reduce((sum, row) => sum + row.ce.bytesOffloaded, 0))}; selected bytes retrieved: ${number(rows.reduce((sum, row) => sum + row.ce.ctxReadBytesRetrieved, 0))}.`,
   );
   return lines.join("\n");

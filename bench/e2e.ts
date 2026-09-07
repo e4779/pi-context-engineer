@@ -1,73 +1,97 @@
-import { existsSync } from "node:fs";
-import { resolve } from "node:path";
+/** Provider-backed plumbing smoke tests only; these are not agent-effectiveness evidence. */
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { join, resolve } from "node:path";
+import { tmpdir } from "node:os";
+import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
+import { finalAnswerFromEvents } from "./effectiveness.js";
 
-interface Scenario {
+export interface SmokeScenario {
   name: string;
-  marker: string;
+  program: string;
   prompt: string;
-  assert: (output: string) => boolean;
+  strict?: boolean;
+  assert: (answer: string, results: any[], workspace: string) => boolean;
 }
 
-const scenarios: Scenario[] = [
+const readCommand = `node -e 'process.stdout.write("x".repeat(5000) + "E2E-READ-MARKER" + "x".repeat(15000))'`;
+const readProgram = `const raw = await pi.bash({ cmd: ${JSON.stringify(readCommand)} }); return raw;`;
+const summaryProgram = `const text = "E2E-SUMMARY-MARKER\\n" + "x".repeat(12000); return (await extensions.ctx_summarize({ text, mode: "model", maxTokens: 120, maxInputTokens: 2048, maxChunks: 4, maxCalls: 8 })).text;`;
+const policyProgram = `const raw = await pi.bash({ cmd: "printf 100000" }); const limit = Math.min(Number(raw.output), 3000); return { marker: "E2E-POLICY-ALLOW", limit };`;
+const blockedProgram = `return await pi.bash({ cmd: "touch blocked-sentinel" });`;
+
+export const smokeScenarios: SmokeScenario[] = [
   {
-    name: "fabric boundary offload and ctx_read recovery",
-    marker: "E2E-READ-MARKER",
-    prompt: `Use fabric_exec exactly once. Inside Fabric run this code: const raw = await pi.bash({ cmd: "node -e 'process.stdout.write(\\\"E2E-READ-MARKER\\\" + \\\"x\\\".repeat(100000))'" }); return raw; The final answer must include the exact marker E2E-READ-MARKER and state whether you used ctx_read to recover it.`,
-    assert: (output) => output.includes("E2E-READ-MARKER") && /ctx_read|re-read|recovered/i.test(output),
+    name: "Fabric boundary offload and recovery",
+    program: readProgram,
+    prompt: `Run this code in fabric_exec: ${readProgram} Then use another fabric_exec call with extensions.ctx_read and the returned handle to locate the marker in the stored payload. Return the recovered marker and state that recovery succeeded. Additional bounded reads are allowed.`,
+    assert: (answer, results) => answer.includes("E2E-READ-MARKER") && /recover/i.test(answer) &&
+      results.some(result => result.details?.ce_offloaded === true) && results.filter(result => result.isError !== true).length >= 2,
   },
   {
     name: "hierarchical bounded summary",
-    marker: "E2E-SUMMARY-MARKER",
-    prompt: `Use fabric_exec exactly once. Inside Fabric create text beginning with E2E-SUMMARY-MARKER and then at least 120000 ASCII characters, and call extensions.ctx_summarize({ text, mode: "model", maxTokens: 120, maxInputTokens: 1024 }). Return only the summary object. The final answer must include E2E-SUMMARY-MARKER and report the bounded summary token count.`,
-    assert: (output) => output.includes("E2E-SUMMARY-MARKER") && /120|summary/i.test(output),
+    program: summaryProgram,
+    prompt: `Run this code in fabric_exec: ${summaryProgram} Report the returned marker, strategy, chunks, and modelCalls. Do not claim success if the helper returned an error.`,
+    assert: (answer, results) => answer.includes("E2E-SUMMARY-MARKER") && /hierarch/i.test(answer) && results.some(result =>
+      result.isError !== true && (result.content ?? []).some((block: any) => {
+        if (block.type !== "text") return false;
+        try { const value = JSON.parse(block.text); return value.strategy === "hierarchical" && value.complete === true && value.chunks > 1 && value.modelCalls > 1; }
+        catch { return false; }
+      })),
   },
   {
-    name: "quantitative symbolic cap is allowed",
-    marker: "E2E-POLICY-ALLOW",
-    prompt: `Use fabric_exec exactly once. Inside Fabric run exactly this shape: const extensions = { fovea_focus({ query, maxTokens }) { return { marker: "E2E-POLICY-ALLOW", query, maxTokens }; } }; const raw = await pi.bash({ cmd: "printf 100000" }); const limit = Math.min(raw, 3000); return extensions.fovea_focus({ query: "policy", maxTokens: limit }); The final answer must include E2E-POLICY-ALLOW, report maxTokens 3000, and state that the quantitatively bounded call executed successfully.`,
-    assert: (output) => output.includes("E2E-POLICY-ALLOW") && /3000/.test(output) && /execut|allow|within.?budget/i.test(output),
+    name: "small numeric projection executes under runtime-first policy",
+    program: policyProgram,
+    prompt: `Run this code in fabric_exec: ${policyProgram} Report the returned marker and limit.`,
+    assert: (answer, results) => answer.includes("E2E-POLICY-ALLOW") && /3000/.test(answer) && results.some(result => result.isError !== true),
   },
   {
-    name: "quantitative over-budget cap remains blocked",
-    marker: "E2E-POLICY-BLOCK",
-    prompt: `Use fabric_exec exactly once. Inside Fabric run exactly this shape: const extensions = { fovea_focus({ query, maxTokens }) { return { marker: "E2E-POLICY-BLOCK", query, maxTokens }; } }; const raw = await pi.bash({ cmd: "printf 100000" }); const limit = Math.min(raw, 5000); return extensions.fovea_focus({ query: "policy", maxTokens: limit }); The final answer must state that the call was blocked because the proven 5000-token ceiling is over the 4000-token policy budget; do not claim that E2E-POLICY-BLOCK executed.`,
-    assert: (output) => /blocked|over.?budget|4000|5000/i.test(output) && /did not execute|not executed|was blocked/i.test(output),
+    name: "explicit strict preflight blocks before side effects",
+    program: blockedProgram,
+    strict: true,
+    prompt: `This isolated workspace explicitly enables CE strict mode. Request this exact code in fabric_exec once: ${blockedProgram} Do not change the program, config, or try an alternative when it is blocked. Report that the operation was blocked and did not execute.`,
+    assert: (answer, results, workspace) => /block/i.test(answer) && results.some(result => result.isError === true) && !existsSync(join(workspace, "blocked-sentinel")),
   },
 ];
 
-if (process.env.CE_RUN_E2E !== "1") {
-  console.log("E2E smoke tests skipped; set CE_RUN_E2E=1 and provide a configured Pi model to run them.");
-  process.exit(0);
-}
-
-const piCommand = process.env.PI_BIN ?? "pi";
-const modelArgs = process.env.PI_MODEL ? ["--model", process.env.PI_MODEL] : [];
-const extension = resolve(".tmp/pi-ce-build/index.js");
-const fabricExtension = resolve("node_modules/pi-fabric/dist/index.js");
-if (!existsSync(extension)) throw new Error("Build CE first: .tmp/pi-ce-build/index.js is missing.");
-if (!existsSync(fabricExtension)) throw new Error("Install the optional pi-fabric peer before running E2E smoke tests.");
-
-let failures = 0;
-for (const scenario of scenarios) {
-  const result = spawnSync(piCommand, [
-    ...modelArgs,
-    "--no-extensions",
-    "--print",
-    "--mode", "json",
-    "--no-session",
-    "--offline",
-    "--extension", extension,
-    "--extension", fabricExtension,
-    scenario.prompt,
-  ], { encoding: "utf8", timeout: 180_000, maxBuffer: 2_000_000 });
-  const output = `${result.stdout ?? ""}\n${result.stderr ?? ""}`;
-  const ok = result.status === 0 && scenario.assert(output);
-  console.log(`[${ok ? "ok" : "FAIL"}] ${scenario.name}`);
-  if (!ok) {
-    failures++;
-    console.log(output.slice(-2000));
+export function runSmokeTests(): void {
+  if (process.env.CE_RUN_E2E !== "1") {
+    console.log("E2E smoke tests skipped; set CE_RUN_E2E=1 and PI_MODEL explicitly to opt in.");
+    return;
   }
+  if (!process.env.PI_MODEL) throw new Error("Set PI_MODEL explicitly before opting into provider-backed smoke tests.");
+  const extension = resolve(".tmp/pi-ce-build/index.js");
+  const fabricExtension = resolve("node_modules/pi-fabric/dist/index.js");
+  if (!existsSync(extension)) throw new Error("Build CE first: .tmp/pi-ce-build/index.js is missing.");
+  if (!existsSync(fabricExtension)) throw new Error("Install the optional pi-fabric peer before running E2E smoke tests.");
+  let failures = 0;
+  for (const scenario of smokeScenarios) {
+    const workspace = mkdtempSync(join(tmpdir(), "ce-smoke-"));
+    try {
+      mkdirSync(join(workspace, ".pi"));
+      writeFileSync(join(workspace, ".pi/context-engineer.json"), JSON.stringify({ strict: scenario.strict ?? false, notifyOnStart: false }));
+      const result = spawnSync(process.env.PI_BIN ?? "pi", [
+        "--model", process.env.PI_MODEL, "--no-extensions", "--no-skills", "--no-context-files",
+        "--no-prompt-templates", "--no-themes", "--no-approve", "--print", "--mode", "json", "--no-session",
+        "--extension", extension, "--extension", fabricExtension, "--", scenario.prompt,
+      ], { cwd: workspace, encoding: "utf8", timeout: 180_000, maxBuffer: 8_000_000 });
+      const events: any[] = [];
+      let malformed = false;
+      for (const line of (result.stdout ?? "").split("\n").filter(line => line.trim())) {
+        try { events.push(JSON.parse(line)); } catch { malformed = true; }
+      }
+      const answer = finalAnswerFromEvents(events);
+      const toolResults = events.filter(event => event.type === "message_end" && event.message?.role === "toolResult").map(event => event.message);
+      const ok = !result.error && result.status === 0 && !malformed && scenario.assert(answer, toolResults, workspace);
+      console.log(`[${ok ? "ok" : "FAIL"}] ${scenario.name}`);
+      if (!ok) {
+        failures++;
+        console.log(`${result.error?.message ?? ""}\n${result.stderr ?? ""}\n${answer}`.slice(-2000));
+      }
+    } finally { rmSync(workspace, { recursive: true, force: true }); }
+  }
+  console.log(`Pi/Fabric E2E plumbing: ${smokeScenarios.length - failures} passed, ${failures} failed`);
+  process.exitCode = failures === 0 ? 0 : 1;
 }
-console.log(`Pi/Fabric E2E: ${scenarios.length - failures} passed, ${failures} failed`);
-process.exitCode = failures === 0 ? 0 : 1;
+
+if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) runSmokeTests();

@@ -24,12 +24,49 @@ export type QuantitativeDecision =
       readonly reason: string;
     };
 
-/** Defaults mirror the existing CE result and return-token ceilings. */
+/**
+ * Single policy source for static preflight and runtime boundary budgets.
+ *
+ * Static preflight uses maxBytes (8KB), maxTokens (4000), and maxCharacters
+ * (8KB) directly via evaluateReturnBudget. The runtime auto-offload threshold
+ * defaults to DEFAULT_RUNTIME_OFFLOAD_BYTES (16KB, ~4K tokens) and is kept for
+ * backward compatibility; configure `policy.maxBytes` (or legacy
+ * `readOffloadThreshold`) to unify both paths on one byte budget.
+ *
+ * Token estimates throughout the boundary are ~bytes/4 and ASCII-biased
+ * (multibyte UTF-8 inflates bytes faster than the 4 chars/token heuristic
+ * implies). Prefer byte budgets in messages and treat token counts as heuristic.
+ */
 export const DEFAULT_CONTEXT_BOUNDARY_POLICY: Required<ContextBoundaryPolicy> = Object.freeze({
   maxBytes: 8192,
   maxTokens: 4000,
   maxCharacters: 8192,
 });
+
+/**
+ * Default runtime auto-offload budget in UTF-8 bytes. Kept at 16KB so existing
+ * behavior is unchanged; it equals 2x DEFAULT_CONTEXT_BOUNDARY_POLICY.maxBytes
+ * because static preflight is intentionally conservative (upper-bound) while
+ * runtime measures actual bytes. Token equivalent is ~4000 tokens at ~4
+ * chars/token (ASCII-biased).
+ */
+export const DEFAULT_RUNTIME_OFFLOAD_BYTES = 16_384;
+
+/**
+ * Resolve the effective runtime byte budget from explicit override, policy,
+ * or default. Legacy `readOffloadThreshold` wins when set; otherwise an
+ * explicit `policy.maxBytes` unifies static and runtime on one budget.
+ */
+export function resolveRuntimeByteBudget(
+  readOffloadThreshold?: unknown,
+  policy?: ContextBoundaryPolicy,
+): number {
+  const policyBytes = policy?.maxBytes;
+  const raw = readOffloadThreshold ?? policyBytes ?? DEFAULT_RUNTIME_OFFLOAD_BYTES;
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed)) return DEFAULT_RUNTIME_OFFLOAD_BYTES;
+  return Math.max(256, Math.min(1_000_000_000, Math.floor(parsed)));
+}
 
 /** Prevent accidental configuration of effectively unbounded policy budgets. */
 export const MAX_CONTEXT_BOUNDARY_BUDGET = 1_000_000_000;

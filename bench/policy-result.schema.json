@@ -1,7 +1,8 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/p-yan-6908/pi-context-engineer/blob/main/bench/policy-result.schema.json",
-  "title": "Context Engineer v0.5 quantitative policy benchmark",
+  "title": "Context Engineer v0.5 deterministic quantitative policy check result",
+  "$comment": "Static policy reports describe analyzer decisions only; they are not Pi agent effectiveness or non-inferiority evidence.",
   "type": "object",
   "additionalProperties": false,
   "required": ["suite", "generatedAt", "environment", "iterations", "rows", "totals"],
@@ -53,7 +54,7 @@
           },
           "policyApplied": { "type": "boolean" },
           "meanAnalysisMs": { "type": "number", "minimum": 0 },
-          "correct": { "type": "boolean" }
+          "correct": { "type": "boolean", "description": "Deterministic expected-vs-actual policy decision check; not agent answer correctness." }
         }
       }
     },
@@ -62,7 +63,7 @@
       "additionalProperties": false,
       "required": ["correct", "intentionalChanges", "legacyParity", "unexpectedDifferences"],
       "properties": {
-        "correct": { "type": "string", "pattern": "^[0-9]+/[0-9]+$" },
+        "correct": { "type": "string", "pattern": "^[0-9]+/[0-9]+$", "description": "Count of deterministic policy checks passed." },
         "intentionalChanges": { "type": "string", "pattern": "^[0-9]+/[0-9]+$" },
         "legacyParity": { "type": "string", "pattern": "^[0-9]+/[0-9]+$" },
         "unexpectedDifferences": { "type": "integer", "minimum": 0 }
