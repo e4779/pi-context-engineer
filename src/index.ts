@@ -215,6 +215,26 @@ function formatHandleText(
   return handle;
 }
 
+// ---- Always-on boundary cheat sheet ---------------------------------------
+// Injected at before_agent_start so the rules travel with the extension
+// lifecycle: enable context-engineer and they appear, disable it and they are
+// gone. Kept deliberately small; the deep playbook lives in the skill.
+
+const BOUNDARY_GUIDELINES = `
+
+## Context boundary (context-engineer)
+
+Tool results over ~16 KB auto-offload to a session-scoped handle: you see a
+structural preview, not the blob.
+- Pull slices with \`ctx_read({ id, offset, length })\`; field names and text
+  occurrences with \`{ id, query }\`; named parts with \`{ id, section }\`.
+- \`jsonPath\` only on JSON handles (\`ctx_offload\` payloads). Auto-offloaded
+  previews are sectioned text — \`jsonPath\` fails there.
+- Handles die with the session and nest: read slices, never re-read raw sources.
+- Prefer deterministic compression: \`ctx_summarize({ text, mode: "structural" | "code", maxTokens })\`.
+  Aggregate in-guest before offloading.
+`;
+
 // ---- Extension setup ----
 
 export default function contextEngineer(pi: ExtensionAPI): void {
@@ -245,6 +265,12 @@ export default function contextEngineer(pi: ExtensionAPI): void {
   const failedChildUsage = new Map<string, { usage?: Usage; complete: boolean }>();
   // execute must throw on failure. Restore measured usage through Pi's
   // supported middleware instead of marking a failed tool as successful.
+  // Always-on boundary cheat sheet: travels with the extension lifecycle.
+  // Appended after the current system prompt (see claude-rules example idiom).
+  pi.on("before_agent_start", async (event) => ({
+    systemPrompt: event.systemPrompt + BOUNDARY_GUIDELINES,
+  }));
+
   pi.on("tool_result", async (event) => {
     const pending = failedChildUsage.get(event.toolCallId);
     if (!pending) return undefined;
