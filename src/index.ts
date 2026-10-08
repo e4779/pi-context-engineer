@@ -238,12 +238,12 @@ Tool results over ~16 KB auto-offload to a session-scoped handle: you see a
 structural preview, not the blob. An \`[offloaded to handle ...]\` notice means
 the data is SAFE and readable — pull slices with \`ctx_read\`; do not re-run the
 command to "get the full output".
-- Pull slices with \`ctx_read({ id, offset, length })\`; field names and text
+- Pull slices with \`extensions.ctx_read({ id, offset, length })\`; field names and text
   occurrences with \`{ id, query }\`; named parts with \`{ id, section }\`.
 - \`jsonPath\` only on JSON handles (\`ctx_offload\` payloads). Auto-offloaded
   previews are sectioned text — \`jsonPath\` fails there.
 - Handles die with the session and nest: read slices, never re-read raw sources.
-- Prefer deterministic compression: \`ctx_summarize({ text, mode: "structural" | "code", maxTokens })\`.
+- Prefer deterministic compression: \`extensions.ctx_summarize({ text, mode: "structural" | "code", maxTokens })\`.
   Aggregate in-guest before offloading.
 `;
 // ---- Extension setup ----
