@@ -203,6 +203,7 @@ function formatHandleText(
   text: string,
   previewBytes: number,
   surface: ReadSurface = "model",
+  nestedRead = false,
 ): string {
   const preview = structuralPreview(text, previewBytes);
   const truncated = Buffer.byteLength(text, "utf8") > previewBytes;
@@ -212,8 +213,12 @@ function formatHandleText(
     `  ${tool}({ id: "${id}", offset: 0, length: 4096 })      // read a window\n` +
     `  ${tool}({ id: "${id}", section: "name" })              // named section of a sectioned preview\n` +
     `  ${tool}({ id: "${id}", jsonPath: "$.path.to.field" })  // JSON payloads only — not for text previews`;
+  const hint = nestedRead
+    ? `\nThis handle holds a ctx_read result — your selection exceeded the boundary. Narrow it: smaller \`length\, tighter \`query\, a single \`section\; or aggregate in-guest and return a digest.`
+    : ``;
   const handle =
     `[offloaded to handle "${id}" — ${bytes} bytes (~${estimatedTokens} tokens). The FULL result is stored; nothing is lost. Do not re-run the command — read the handle instead:]\n` +
+    hint +
     actions +
     `\nPreview (first ${previewBytes} bytes of the stored payload):\n${preview}` +
     (truncated ? `\n[preview ends mid-payload; the handle holds the rest]` : ``);
@@ -453,7 +458,7 @@ export default function contextEngineer(pi: ExtensionAPI): void {
       const summary = JSON.stringify(summarizeText(payload, Math.floor(previewBytes / 4)));
       replacement = `Structural summary:\n${structuralPreview(summary, previewBytes)}\n${recovery}`;
     } else {
-      replacement = formatHandleText(offloaded.id, offloaded.bytes, offloaded.estimatedTokens, payload, previewBytes, event.toolName === "fabric_exec" ? "fabric" : "model");
+      replacement = formatHandleText(offloaded.id, offloaded.bytes, offloaded.estimatedTokens, payload, previewBytes, event.toolName === "fabric_exec" ? "fabric" : "model", event.toolName === "ctx_read");
     }
     // Preserve media positions and a bounded allowance of short independent
     // text notes. The handle retains ALL original text blocks with indices.
