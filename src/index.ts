@@ -214,7 +214,7 @@ function formatHandleText(
     `  ${tool}({ id: "${id}", section: "name" })              // named section of a sectioned preview\n` +
     `  ${tool}({ id: "${id}", jsonPath: "$.path.to.field" })  // JSON payloads only — not for text previews`;
   const hint = nestedRead
-    ? `\nThis handle holds a ctx_read result — your selection exceeded the boundary. Narrow it: smaller \`length\, tighter \`query\, a single \`section\; or aggregate in-guest and return a digest.`
+    ? `\nThis handle holds a ctx_read result — your selection exceeded the boundary. Narrow it: smaller \`length\`, tighter \`query\`, a single \`section\`; or aggregate in-guest and return a digest.`
     : ``;
   const handle =
     `[offloaded to handle "${id}" — ${bytes} bytes (~${estimatedTokens} tokens). The FULL result is stored; nothing is lost. Do not re-run the command — read the handle instead:]\n` +
